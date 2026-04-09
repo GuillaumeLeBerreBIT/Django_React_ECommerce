@@ -9,7 +9,7 @@
 ## Table of Contents
 - [Project Overview](#project-overview)
 - [Section 1 — Project Setup & Frontend Scaffold](#section-1--project-setup--frontend-scaffold)
-- [Section 2 — Product Listing & Rating Component](#section-2--product-listing--rating-component)
+- [Section 2 — Starting the Front End](#section-2--starting-the-front-end)
 
 ---
 
@@ -145,20 +145,21 @@ function App() {
 
 ---
 
-## Section 2 — Product Listing & Rating Component
+## Section 2 — Starting the Front End
 
 ### What was built
 
-The homepage product grid and reusable product card with star rating display.
+The full frontend — product grid, product detail page, routing, and reusable components.
 
 **Files created:**
 - `frontend/src/products.js` — hardcoded product data (temporary, replaced by Django API later)
 - `frontend/src/pages/HomeScreen.jsx` — homepage, renders the product grid
+- `frontend/src/pages/ProductScreen.jsx` — product detail page
 - `frontend/src/components/Product.jsx` — single product card component
 - `frontend/src/components/Rating.jsx` — reusable star rating display component
 
 **Files updated:**
-- `frontend/src/App.js` — now renders `<HomeScreen>` in the main body
+- `frontend/src/App.js` — added React Router (Router, Routes, Route) and all page routes
 
 ---
 
@@ -334,5 +335,461 @@ App
 ```
 
 ---
+
+---
+
+### App.js — Routing Setup
+
+```jsx
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
+
+function App() {
+  return (
+    <Router>
+      <Header />
+      <main className='py-3'>
+        <Container>
+          <Routes>
+            <Route path='/' element={<HomeScreen />} />
+            <Route path='/product/:id' element={<ProductScreen />} />
+          </Routes>
+        </Container>
+      </main>
+      <Footer />
+    </Router>
+  );
+}
+```
+
+**What it does:**
+- `<Router>` wraps the entire app — required so that `<Link>` components anywhere in the tree (including `Header`) have access to routing context
+- `<Routes>` wraps only the swappable content area — `Header` and `Footer` sit outside it so they stay permanently visible
+- Two routes defined:
+  - `/` → renders `HomeScreen`
+  - `/product/:id` → renders `ProductScreen`, where `:id` is a dynamic URL parameter
+
+**Why `Router` wraps everything and not just `Routes`:**
+`Header` contains `<Link>` components which need the Router context. If `Router` only wrapped `Routes`, the Header links would break.
+
+---
+
+### Route vs Link
+
+| | `<Route>` | `<Link>` |
+|---|---|---|
+| Lives in | `App.js` | Any component |
+| Purpose | Defines what renders at a URL | Changes the URL when clicked |
+| Visible to user | No — purely logical | Yes — renders as `<a>` tag |
+| Triggers navigation | No | Yes |
+
+**The chain:**
+```
+User clicks <Link to="/product/3">
+        ↓
+URL changes to /product/3 (no page reload)
+        ↓
+<Route path='/product/:id'> matches
+        ↓
+<ProductScreen /> renders
+```
+
+---
+
+### Dynamic URL params — `:id`
+
+The `:` in `/product/:id` tells React Router this segment is a **variable**, not a literal string.
+
+- `/product/1` → matches, captures `id = "1"`
+- `/product/42` → matches, captures `id = "42"`
+- `/product` → does NOT match (missing the id segment)
+
+Without `:id` the route would only match `/product` exactly — useless since you need to know which product to show.
+
+**Reading the param inside the component:**
+
+```jsx
+// v5 (old course syntax — does NOT work in v6/v7)
+export default function ProductScreen({ match }) {
+  const product = products.find((p) => p._id == match.params.id)
+}
+
+// v6/v7 (correct)
+import { useParams } from 'react-router-dom'
+
+export default function ProductScreen() {
+  const { id } = useParams()
+  const product = products.find((p) => p._id === id)
+}
+```
+
+`useParams()` is a **hook** — a React function that reads data from the current context. In v6+ all route data is accessed via hooks, not props.
+
+---
+
+### ProductScreen.jsx — Product Detail Page
+
+```jsx
+export default function ProductScreen() {
+  const { id } = useParams()
+  const product = products.find((p) => p._id === id)
+
+  return (
+    <div>
+      <Link to="/" className="btn btn-light my-3">Go Back</Link>
+      <Row>
+        <Col md={6}>
+          <Image src={product.image} alt={product.name} fluid />
+        </Col>
+        <Col md={3}>
+          <ListGroup variant="flush">
+            <ListGroup.Item><h3>{product.name}</h3></ListGroup.Item>
+            <ListGroup.Item>
+              <Rating value={product.rating} text={`${product.numReviews} reviews`} color="#f8e825" />
+            </ListGroup.Item>
+            <ListGroup.Item>Price: ${product.price}</ListGroup.Item>
+            <ListGroup.Item>Description: {product.description}</ListGroup.Item>
+          </ListGroup>
+        </Col>
+        <Col md={3}>
+          <Card>
+            <ListGroup variant="flush">
+              <ListGroup.Item>
+                <Row>
+                  <Col>Price:</Col>
+                  <Col><strong>${product.price}</strong></Col>
+                </Row>
+              </ListGroup.Item>
+              <ListGroup.Item>
+                <Row>
+                  <Col>Stock:</Col>
+                  <Col>{product.countInStock > 0 ? 'In Stock' : 'Out of Stock'}</Col>
+                </Row>
+              </ListGroup.Item>
+              <ListGroup.Item>
+                <Button className="w-100" type="button" disabled={product.countInStock === 0}>
+                  Add to cart
+                </Button>
+              </ListGroup.Item>
+            </ListGroup>
+          </Card>
+        </Col>
+      </Row>
+    </div>
+  )
+}
+```
+
+**Layout — 3 column structure:**
+```
+| Col md=6        | Col md=3         | Col md=3        |
+| Product image   | Details list     | Purchase card   |
+|                 | - Name           | - Price         |
+|                 | - Rating         | - Stock status  |
+|                 | - Price          | - Add to cart   |
+|                 | - Description    |                 |
+```
+
+**Key parts:**
+- `<Image fluid />` — Bootstrap responsive image, scales to fit its container
+- `<ListGroup variant="flush">` — removes outer borders so the list sits cleanly inside a `Card`
+- Stock status uses ternary: `countInStock > 0 ? 'In Stock' : 'Out of Stock'`
+- `disabled={product.countInStock === 0}` — disables the button when out of stock, Bootstrap greys it out automatically
+- `<Link to="/">` styled as a button via Bootstrap classes (`btn btn-light`) — it's still a link, just looks like a button
+
+---
+
+### Bootstrap Version Gotchas (v4 → v5)
+
+This course was recorded with Bootstrap 4. You're running Bootstrap 5 (via Bootswatch Lux theme). Two differences already encountered:
+
+| Bootstrap 4 | Bootstrap 5 equivalent |
+|---|---|
+| `className="btn-block"` | `className="w-100"` or wrap in `<div className="d-grid">` |
+| `btn-block` makes full width | `w-100` sets `width: 100%` |
+
+Watch for similar small class name changes as the course progresses.
+
+---
+
+### Key Concepts from this Section
+
+**React Router v6/v7 vs v5**
+- v5 injected `match`, `history`, `location` as props — no longer works
+- v6/v7 uses hooks: `useParams()`, `useNavigate()`, `useLocation()`
+- Always use `element={<Component />}` not `component={Component}`
+
+**`useParams()` hook**
+- Reads dynamic URL segments defined with `:` in the route path
+- Returns an object — destructure the param name you defined: `const { id } = useParams()`
+- The name must match exactly: route says `:id` → `useParams()` returns `{ id }`
+
+**`<Image fluid />`**
+- React Bootstrap's responsive image component
+- `fluid` prop adds `max-width: 100%` so image never overflows its container
+
+**`<ListGroup variant="flush">`**
+- Removes the outer border and rounded corners from the list group
+- Used when the list sits inside a `Card` so it blends in cleanly
+
+**Updated component tree:**
+```
+App (Router)
+├── Header
+├── main
+│   └── Routes
+│       ├── / → HomeScreen
+│       │       └── Product (×6)
+│       │               └── Rating
+│       └── /product/:id → ProductScreen
+│                               └── Rating
+└── Footer
+```
+
+---
+
+---
+
+## Section 3 — Django Backend & Connecting React to the API
+
+### What was built
+
+The Django REST Framework backend with three API endpoints, and the React frontend updated to fetch real data from those endpoints instead of the hardcoded `products.js` file.
+
+**Files created:**
+- `backend/` — new Django project folder (created with `django-admin startproject backend`)
+- `backend/api/` — Django app (created with `python manage.py startapp api`)
+- `backend/api/products.py` — temporary hardcoded product data (mirrors the old `frontend/src/products.js`)
+- `backend/api/views.py` — three Class Based Views (APIView)
+- `backend/api/urls.py` — URL patterns for the `api` app
+
+**Files updated:**
+- `backend/backend/settings.py` — registered `rest_framework`, `corsheaders`, and `api` app; added CORS config
+- `backend/backend/urls.py` — wired `api/` prefix to `api.urls`
+- `frontend/src/pages/HomeScreen.jsx` — replaced static import with `useState` + `useEffect` + axios
+- `frontend/src/pages/ProductScreen.jsx` — same pattern, fetches single product by id
+
+---
+
+### settings.py — Registering apps and CORS
+
+```python
+INSTALLED_APPS = [
+    # Django built-ins ...
+    'api.apps.ApiConfig',   # our app
+    'rest_framework',       # DRF
+    'corsheaders'           # CORS headers
+]
+
+MIDDLEWARE = [
+    'django.middleware.security.SecurityMiddleware',
+    "corsheaders.middleware.CorsMiddleware",   # must be near the top
+    "django.middleware.common.CommonMiddleware",
+    # ... rest of middleware
+]
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+```
+
+**What CORS is and why it's needed:**
+
+By default browsers block JavaScript on one origin (e.g. `localhost:3000`) from reading responses from a different origin (`localhost:8000`). This is the browser's Same-Origin Policy — a security feature.
+
+`django-cors-headers` adds the right HTTP headers to Django's responses to tell the browser "this origin is allowed to read my responses".
+
+```
+React (port 3000)  ──GET /api/products/──►  Django (port 8000)
+                   ◄──Access-Control-Allow-Origin: localhost:3000──
+                                 ↑
+                   corsheaders adds this header
+```
+
+Without it, axios gets the data but the browser refuses to hand it to your JS code.
+
+**Why `CorsMiddleware` must be near the top:**
+Django runs middleware top-to-bottom on every request. CORS headers need to be added before any other middleware might short-circuit the response (e.g. returning a 403). Placing it second (after `SecurityMiddleware`) guarantees it always runs.
+
+---
+
+### URL routing — two-level system
+
+Django URL routing is split across two files:
+
+```
+backend/backend/urls.py          backend/api/urls.py
+───────────────────────          ────────────────────────────────────
+admin/  → admin site             ''           → GetRoutes
+api/    ──include()──────────►   products/    → GetProducts
+                                 products/<str:pk> → GetProduct
+```
+
+**backend/backend/urls.py** (the project-level router):
+```python
+urlpatterns = [
+    path('admin/', admin.site.urls),
+    path('api/', include('api.urls')),  # hands off anything starting with api/ to api/urls.py
+]
+```
+
+**backend/api/urls.py** (the app-level router):
+```python
+urlpatterns = [
+    path('', views.GetRoutes.as_view(), name='get_routes'),
+    path('products/', views.GetProducts.as_view(), name='get_products'),
+    path('products/<str:pk>', views.GetProduct.as_view(), name='get_product'),
+]
+```
+
+The `<str:pk>` in the last path is a **URL parameter** — same idea as React Router's `:id`. Django captures whatever string is in that position and passes it to the view as `pk`.
+
+**The `.as_view()` call:**
+FBVs are just functions — you reference them directly. CBVs are classes — `.as_view()` converts the class into a callable function that Django's URL system can use. Without it you'd get an error.
+
+| FBV url wiring | CBV url wiring |
+|---|---|
+| `path('', views.get_products)` | `path('', views.GetProducts.as_view())` |
+
+---
+
+### views.py — Class Based Views (APIView)
+
+```python
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from .products import products
+
+
+class GetRoutes(APIView):
+    def get(self, request):
+        routes = [
+            'GET /api/products',
+            'GET /api/products/<id>',
+        ]
+        return Response(routes)
+
+
+class GetProducts(APIView):
+    def get(self, request):
+        return Response(products)
+
+
+class GetProduct(APIView):
+    def get(self, request, pk):
+        try:
+            product = [p for p in products if p['_id'] == pk][0]
+        except IndexError:
+            product = None
+        return Response(product)
+```
+
+**Why `class` not `def`:**
+In the tutorial the instructor writes `@api_view(['GET']) def getProducts(request)`. Here you're using CBVs instead. The HTTP method (`GET`) becomes a method named `get` on the class. Django calls the right method automatically based on the incoming request type.
+
+**`APIView` vs plain Django `View`:**
+`APIView` comes from Django REST Framework and adds:
+- Automatic JSON parsing of incoming request bodies
+- `Response()` — a DRF response that handles content negotiation (returns JSON by default)
+- The browsable API UI (visit `localhost:8000/api/products/` in the browser to see it)
+
+**`GetProduct` — finding by pk:**
+```python
+product = [p for p in products if p['_id'] == pk][0]
+```
+This is a **list comprehension** — it loops over `products`, keeps only the ones where `_id` matches `pk`, then takes the first result (`[0]`). If nothing matches, `[0]` raises an `IndexError`, which is caught and returns `None`.
+
+---
+
+### Frontend — useState + useEffect + axios pattern
+
+Both `HomeScreen` and `ProductScreen` now follow the same pattern for fetching data from the API:
+
+```jsx
+// HomeScreen.jsx
+const [products, setProducts] = useState([]);  // [] = empty array while loading
+
+useEffect(() => {
+  async function fetchProducts() {
+    const { data } = await axios.get('/api/products/');
+    setProducts(data);
+  }
+  fetchProducts();
+}, []);  // [] = only run once, when the component first mounts
+```
+
+```jsx
+// ProductScreen.jsx
+const { id } = useParams();
+const [product, setProduct] = useState('');  // empty while loading
+
+useEffect(() => {
+  async function getProduct(id) {
+    const { data } = await axios.get(`/api/products/${id}`);
+    setProduct(data);
+  }
+  getProduct(id);
+}, [id]);  // re-run if id changes (user navigates to a different product)
+```
+
+**The render cycle with async data:**
+```
+1. Component renders → products = [] (empty, nothing displayed yet)
+2. useEffect runs after render → axios fetches from Django
+3. Django responds with JSON → setProducts(data) called
+4. React re-renders → products = [...] → cards appear on screen
+```
+
+This is why `useState([])` matters — on step 1, React tries to call `.map()` on whatever the initial state is. If it's `undefined` (no default), `.map()` crashes. An empty array `[]` is safe to `.map()` over — it just renders nothing until data arrives.
+
+**The dependency array `[]`:**
+
+| `useEffect(() => {...})` | No array — runs after every render (infinite loop risk) |
+|---|---|
+| `useEffect(() => {...}, [])` | Empty array — runs once on mount only |
+| `useEffect(() => {...}, [id])` | Runs when `id` changes |
+
+`ProductScreen` uses `[id]` so if the user navigates directly from one product page to another, the fetch re-runs for the new id.
+
+**Proxy vs CORS:**
+The `"proxy": "http://127.0.0.1:8000"` in `frontend/package.json` forwards API requests in development so axios can call `/api/products/` (relative URL) instead of `http://127.0.0.1:8000/api/products/` (absolute). The CORS setup in Django is still needed for when you eventually build and deploy, or if the proxy doesn't forward correctly.
+
+---
+
+### Bugs caught and fixed in this section
+
+| Bug | Cause | Fix |
+|---|---|---|
+| `urlpattern` not found | Typo — missing `s` | `urlpatterns` |
+| `path('', include('api.urls'))` → 404 on `/api/` | api app mounted at root, not at `api/` | `path('api/', include('api.urls'))` |
+| `def getRoutes(APIView)` | Wrote a function with a parameter, not a class | `class GetRoutes(APIView):` |
+| `products.map is not a function` | `useState()` starts as `undefined` | `useState([])` |
+| `useEffect` runs infinitely | Missing dependency array | Add `[]` as second argument |
+| `getProduct()` called without argument | Function defined with `id` param but called with nothing | `getProduct(id)` |
+
+---
+
+### Key Concepts from this Section
+
+**Django REST Framework (DRF)**
+- A library built on top of Django that makes building JSON APIs much easier
+- Provides `APIView`, `Response`, serializers, and the browsable API UI
+- Install: `pip install djangorestframework`
+
+**Class Based Views (CBV) vs Function Based Views (FBV)**
+- FBV: one function per endpoint, decorated with `@api_view`
+- CBV: one class per endpoint, HTTP methods become class methods (`get`, `post`, `put`, `delete`)
+- CBVs are more structured and easier to extend, but slightly more verbose for simple cases
+- URL wiring difference: CBVs require `.as_view()`, FBVs do not
+
+**`useEffect` hook**
+- Runs side effects (fetching data, subscriptions, timers) after the component renders
+- The dependency array controls when it re-runs
+- Never put `async` directly on the `useEffect` callback — define an inner async function and call it
+
+**`useState` initial value matters**
+- The initial value is what React renders with on the very first render, before any data arrives
+- Arrays of things → `[]`, single objects → `{}` or `null`, strings → `''`
+- Using no default (`useState()`) gives `undefined`, which crashes any `.map()` or property access
 
 *More sections will be added as the course progresses.*

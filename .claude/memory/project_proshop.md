@@ -18,6 +18,6 @@ A `NOTES.md` file exists at the project root:
 
 **Current progress:**
 - Section 1 complete — Frontend scaffold (App.js, Header.jsx, Footer.jsx)
-- Section 2 complete — Product listing (HomeScreen.jsx, Product.jsx, Rating.jsx, products.js)
-- React Bootstrap grid in use, Font Awesome icons for stars
-- No routing yet, no Redux yet, no Django backend yet
+- Section 2 complete — "Starting the Front End": HomeScreen, Product, Rating, Routing, ProductScreen (all one section)
+- React Bootstrap grid in use, Font Awesome icons for stars, Bootswatch Lux theme
+- No Redux yet, no Django backend yet
