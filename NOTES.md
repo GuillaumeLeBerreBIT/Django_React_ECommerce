@@ -792,4 +792,313 @@ The `"proxy": "http://127.0.0.1:8000"` in `frontend/package.json` forwards API r
 - Arrays of things → `[]`, single objects → `{}` or `null`, strings → `''`
 - Using no default (`useState()`) gives `undefined`, which crashes any `.map()` or property access
 
+---
+
+### Sections 14–17 — Database Setup, Models, Image Field & Static Files
+
+**Files created/updated:**
+- `backend/api/models.py` — five Django models (Product, Review, Order, OrderItem, ShippingAddress)
+- `backend/api/admin.py` — registered all models with the admin panel
+- `backend/api/migrations/` — auto-generated migration files (one per change)
+- `backend/backend/settings.py` — added `MEDIA_URL`, `MEDIA_ROOT`, `STATIC_FILES_DIRS`
+
+---
+
+### The Django database workflow
+
+Every time you change `models.py`, you follow the same two-step command sequence:
+
+```
+1. python manage.py makemigrations
+   → Django reads models.py and writes a migration file (a Python script describing the change)
+
+2. python manage.py migrate
+   → Django runs those migration files against the database (SQLite by default)
+```
+
+Think of migrations as a version history for your database schema — each file records one set of changes so the database can be updated incrementally without losing data.
+
+```
+models.py  ──makemigrations──►  migrations/0001_initial.py
+                                migrations/0002_alter_product_rating.py
+                                migrations/0003_order_orderitem_review_...py
+                                migrations/0004_product_image.py
+                                        │
+                                  migrate▼
+                                    db.sqlite3  (actual database)
+```
+
+---
+
+### The Admin Panel
+
+Django ships with a built-in admin UI at `/admin/`. To use it:
+
+```bash
+python manage.py createsuperuser   # creates a login account
+```
+
+To make your models appear in the admin:
+
+```python
+# admin.py
+from django.contrib import admin
+from .models import *
+
+admin.site.register(Product)
+admin.site.register(Review)
+admin.site.register(Order)
+admin.site.register(OrderItem)
+admin.site.register(ShippingAddress)
+```
+
+`from .models import *` imports all models at once. Each `register()` call tells Django's admin to expose that model — you can then create, read, update, and delete records through the browser UI without writing any views.
+
+`__str__` on each model controls how a record displays in the admin list:
+```python
+def __str__(self):
+    return self.name   # Product shows its name in the list
+```
+
+---
+
+### models.py — Field types explained (once each)
+
+```python
+class Product(models.Model):
+    user        = models.ForeignKey(...)
+    name        = models.CharField(max_length=200, null=True, blank=True)
+    image       = models.ImageField(null=True, blank=True)
+    description = models.TextField(null=True, blank=True)
+    rating      = models.DecimalField(max_digits=7, decimal_places=2, null=True, blank=True)
+    numReviews  = models.IntegerField(null=True, blank=True, default=0)
+    isPaid      = models.BooleanField(default=False)
+    createdAt   = models.DateTimeField(auto_now_add=True)
+    _id         = models.AutoField(primary_key=True, editable=False)
+```
+
+| Field type | Used for | Key options |
+|---|---|---|
+| `CharField` | Short text (names, titles) | `max_length` required |
+| `TextField` | Long text (descriptions, comments) | No max length |
+| `IntegerField` | Whole numbers | `default=0` common |
+| `DecimalField` | Precise numbers (money) | `max_digits`, `decimal_places` both required |
+| `BooleanField` | True/False | `default=False` common |
+| `DateTimeField` | Date + time | `auto_now_add=True` = set once on create |
+| `ImageField` | Image file upload | Stores the file path, not the file itself |
+| `AutoField` | Auto-incrementing integer | Used here as custom primary key `_id` |
+
+**`null=True` vs `blank=True` — they do different things:**
+
+| Option | Controls | Where |
+|---|---|---|
+| `null=True` | Database level — the column can store NULL | SQLite/Postgres |
+| `blank=True` | Validation level — the field can be left empty in forms/admin | Django forms |
+
+You almost always use both together. Using only `null=True` means the DB accepts NULL but Django's form validation still rejects empty submissions.
+
+**`auto_now_add=True`** — sets the timestamp automatically the moment a record is created. You cannot edit it afterwards (that's what `auto_now_add=False, blank=True, null=True` is for — a nullable datetime you control manually, like `paidAt`).
+
+**`_id = models.AutoField(primary_key=True, editable=False)`** — Django normally creates an `id` field automatically. Here it's overridden with `_id` to match the MongoDB-style naming used in the frontend from earlier. `editable=False` hides it from forms and admin.
+
+---
+
+### Relationships between models
+
+The data model has three types of relationships:
+
+**ForeignKey — many-to-one**
+```python
+# Review → Product (many reviews can belong to one product)
+product = models.ForeignKey(to=Product, on_delete=models.SET_NULL, null=True)
+```
+Many reviews can point to one product, but each review only points to one product.
+
+`on_delete=models.SET_NULL` — if the referenced product is deleted, set this field to NULL instead of deleting the review too. Requires `null=True`.
+
+Other `on_delete` options:
+| Option | Effect when parent is deleted |
+|---|---|
+| `CASCADE` | Delete this record too |
+| `SET_NULL` | Set field to NULL (requires `null=True`) |
+| `PROTECT` | Block deletion of parent if children exist |
+
+**OneToOneField — one-to-one**
+```python
+# ShippingAddress → Order (each order has exactly one shipping address)
+order = models.OneToOneField(to=Order, on_delete=models.CASCADE, null=True, blank=True)
+```
+Like ForeignKey but enforces uniqueness — you can't attach two shipping addresses to the same order.
+
+`CASCADE` here means: if the order is deleted, delete its shipping address too. Makes sense since an address without an order is meaningless.
+
+**Built-in `User` model**
+```python
+from django.contrib.auth.models import User
+
+user = models.ForeignKey(to=User, on_delete=models.SET_NULL, null=True)
+```
+Django ships with a `User` model (with username, password, email etc.) already built. You don't rewrite it — you just import and reference it. Products, Reviews, and Orders all link to `User` this way.
+
+**Full relationship map:**
+```
+User ──────────────────────────────────┐
+ │                                     │
+ ├──(FK)──► Product ◄──(FK)── Review   │
+ │               ▲                     │
+ │               │                     │
+ └──(FK)──► Order ──(1:1)──► ShippingAddress
+                 │
+                 └──(FK)── OrderItem ──(FK)──► Product
+```
+
+---
+
+### ImageField & Static Files (sections 16–17)
+
+**Why ImageField needs an extra package:**
+Django's `ImageField` validates that the uploaded file is actually an image. This requires `Pillow`:
+```bash
+pip install Pillow
+```
+Without Pillow, `makemigrations` will error when it sees `ImageField`.
+
+**settings.py additions:**
+```python
+MEDIA_URL = '/images/'         # URL prefix for serving uploaded files
+MEDIA_ROOT = 'static/images'   # where files are actually saved on disk
+
+STATIC_FILES_DIRS = [
+    BASE_DIR / 'static'        # where Django looks for static assets (CSS, JS, images)
+]
+```
+
+```
+Browser requests /images/airpods.jpg
+        ↓
+Django maps MEDIA_URL → MEDIA_ROOT
+        ↓
+Reads from: backend/static/images/airpods.jpg
+```
+
+**Static vs Media files:**
+
+| | Static files | Media files |
+|---|---|---|
+| What | CSS, JS, hardcoded images | User-uploaded files |
+| Setting | `STATIC_URL`, `STATICFILES_DIRS` | `MEDIA_URL`, `MEDIA_ROOT` |
+| Changes | Only when you redeploy | Any time a user uploads |
+
+---
+
+---
+
+### Section 18 — Serializers
+
+**Files created/updated:**
+- `backend/api/serializers.py` — `ProductSerializer` using `ModelSerializer`
+- `backend/api/views.py` — updated `GetProducts` and `GetProduct` to serialize QuerySet data before returning it
+
+---
+
+### Why serializers are needed
+
+When Django queries the database, it returns **Python objects** (QuerySet instances), not JSON. `Response()` can't send Python objects over HTTP — it needs plain data (dicts, lists, strings).
+
+A serializer converts in both directions:
+
+```
+Database QuerySet ──serialize──► Python dict ──► JSON   (reading)
+JSON              ──deserialize──► Python dict ──► save()  (writing)
+```
+
+Without a serializer you'd get an error like:
+```
+Object of type Product is not JSON serializable
+```
+
+---
+
+### serializers.py
+
+```python
+from rest_framework import serializers
+from .models import Product
+
+class ProductSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = Product
+        fields = '__all__'
+```
+
+**`ModelSerializer`** — the fastest way to build a serializer. It reads your model definition and auto-generates all the fields for you. You don't list them manually.
+
+**`class Meta`** — an inner class that configures the serializer:
+
+| Meta option | What it does |
+|---|---|
+| `model = Product` | Which model to base the serializer on |
+| `fields = '__all__'` | Include every field from the model |
+| `fields = ['name', 'price']` | Alternative — include only listed fields |
+| `exclude = ['_id']` | Alternative — include everything except listed fields |
+
+---
+
+### views.py — before and after serializers
+
+**Before** — returning a raw QuerySet (broken):
+```python
+def get(self, request):
+    products = Product.objects.all()
+    return Response(products)   # ✗ can't serialize QuerySet objects
+```
+
+**After** — passing through the serializer first:
+```python
+def get(self, request):
+    products = Product.objects.all()
+    serializer = ProductSerializer(products, many=True)
+    return Response(serializer.data)   # ✓ serializer.data is a plain dict/list
+```
+
+**The `many` argument:**
+
+| Situation | Argument |
+|---|---|
+| Serializing a list / QuerySet | `many=True` |
+| Serializing a single object | `many=False` (default, can be omitted) |
+
+```python
+# GetProducts — list of products
+serializer = ProductSerializer(products, many=True)
+
+# GetProduct — single product
+serializer = ProductSerializer(product, many=False)
+```
+
+**`serializer.data`** is the final converted output — a Python dict (or list of dicts) that `Response()` can turn into JSON and send to the browser.
+
+---
+
+### Full data flow with serializer
+
+```
+Browser GET /api/products/
+        ↓
+GetProducts.get()
+        ↓
+Product.objects.all()  →  QuerySet [<Product>, <Product>, ...]
+        ↓
+ProductSerializer(queryset, many=True)
+        ↓
+serializer.data  →  [{'_id': 1, 'name': 'Airpods', ...}, {...}]
+        ↓
+Response(serializer.data)  →  JSON sent to browser
+        ↓
+React axios receives data → setProducts(data) → renders cards
+```
+
+---
+
 *More sections will be added as the course progresses.*
