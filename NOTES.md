@@ -991,19 +991,15 @@ Reads from: backend/static/images/airpods.jpg
 
 ---
 
----
-
-### Section 18 — Serializers
+### Serializers — connecting the database to JSON
 
 **Files created/updated:**
 - `backend/api/serializers.py` — `ProductSerializer` using `ModelSerializer`
 - `backend/api/views.py` — updated `GetProducts` and `GetProduct` to serialize QuerySet data before returning it
 
----
+**Why serializers are needed:**
 
-### Why serializers are needed
-
-When Django queries the database, it returns **Python objects** (QuerySet instances), not JSON. `Response()` can't send Python objects over HTTP — it needs plain data (dicts, lists, strings).
+When Django queries the database it returns **Python objects** (QuerySet instances), not JSON. `Response()` can't send Python objects over HTTP — it needs plain data (dicts, lists, strings).
 
 A serializer converts in both directions:
 
@@ -1017,9 +1013,7 @@ Without a serializer you'd get an error like:
 Object of type Product is not JSON serializable
 ```
 
----
-
-### serializers.py
+**serializers.py:**
 
 ```python
 from rest_framework import serializers
@@ -1032,9 +1026,9 @@ class ProductSerializer(serializers.ModelSerializer):
         fields = '__all__'
 ```
 
-**`ModelSerializer`** — the fastest way to build a serializer. It reads your model definition and auto-generates all the fields for you. You don't list them manually.
+`ModelSerializer` reads your model definition and auto-generates all the fields for you — you don't list them manually.
 
-**`class Meta`** — an inner class that configures the serializer:
+`class Meta` is an inner class that configures the serializer:
 
 | Meta option | What it does |
 |---|---|
@@ -1043,19 +1037,15 @@ class ProductSerializer(serializers.ModelSerializer):
 | `fields = ['name', 'price']` | Alternative — include only listed fields |
 | `exclude = ['_id']` | Alternative — include everything except listed fields |
 
----
+**views.py — before and after:**
 
-### views.py — before and after serializers
-
-**Before** — returning a raw QuerySet (broken):
 ```python
+# Before — returning a raw QuerySet (broken)
 def get(self, request):
     products = Product.objects.all()
     return Response(products)   # ✗ can't serialize QuerySet objects
-```
 
-**After** — passing through the serializer first:
-```python
+# After — passing through the serializer first
 def get(self, request):
     products = Product.objects.all()
     serializer = ProductSerializer(products, many=True)
@@ -1069,19 +1059,9 @@ def get(self, request):
 | Serializing a list / QuerySet | `many=True` |
 | Serializing a single object | `many=False` (default, can be omitted) |
 
-```python
-# GetProducts — list of products
-serializer = ProductSerializer(products, many=True)
+**`serializer.data`** is the final converted output — a Python dict (or list of dicts) that `Response()` turns into JSON and sends to the browser.
 
-# GetProduct — single product
-serializer = ProductSerializer(product, many=False)
-```
-
-**`serializer.data`** is the final converted output — a Python dict (or list of dicts) that `Response()` can turn into JSON and send to the browser.
-
----
-
-### Full data flow with serializer
+**Full data flow with serializer:**
 
 ```
 Browser GET /api/products/
@@ -1098,6 +1078,232 @@ Response(serializer.data)  →  JSON sent to browser
         ↓
 React axios receives data → setProducts(data) → renders cards
 ```
+
+---
+
+## Section 4 — Implementing Redux for State Management
+
+### What was built
+
+A Redux store wired into the React app, with the first action/reducer pair for fetching the product list from Django.
+
+**Files created:**
+- `frontend/src/Store.jsx` — creates and exports the Redux store
+- `frontend/src/constants/productConstants.js` — shared string constants for action types
+- `frontend/src/reducers/productReducers.js` — reducer for the product list slice of state
+- `frontend/src/actions/productActions.js` — async action creator that fetches from Django
+
+**Files updated:**
+- `frontend/src/index.js` — wrapped `<App>` in `<Provider store={store}>`
+
+---
+
+### Why Redux — the problem it solves
+
+Before Redux, each component managed its own local state and fetched its own data:
+
+```js
+// HomeScreen — had to fetch for itself
+const [products, setProducts] = useState([])
+useEffect(() => { axios.get('/api/products/').then(...) }, [])
+```
+
+This works for one screen. But in a full app:
+- The cart count needs to show in `<Header>` AND on the cart page
+- User login state is needed in `<Header>`, checkout, and profile
+- You'd have to lift state up to `<App>` and prop-drill it down everywhere
+
+Redux fixes this with a **single store** that any component can read from directly:
+
+```
+Before Redux                     After Redux
+────────────────────             ──────────────────────────
+App (holds all state)            Redux Store (holds all state)
+ ├─ Header (gets user            ├─ Header ──useSelector──► store.userLogin
+ │   via props ↑↑↑)             ├─ HomeScreen ──useSelector──► store.productList
+ ├─ HomeScreen (gets             └─ CartScreen ──useSelector──► store.cart
+ │   products via props ↑)
+ └─ CartScreen (gets
+     cart via props ↑↑)
+```
+
+---
+
+### The four files and what each one does
+
+#### 1. `productConstants.js` — shared labels
+
+```js
+export const PRODUCT_LIST_REQUEST = 'PRODUCT_LIST_REQUEST'
+export const PRODUCT_LIST_SUCCESS = 'PRODUCT_LIST_SUCCESS'
+export const PRODUCT_LIST_FAIL    = 'PRODUCT_LIST_FAIL'
+```
+
+Just strings. Imported by both the action and the reducer so they always use the exact same value. If you typed the string manually in both files and made a typo in one, the action and reducer would never match — a silent bug. A shared constant turns that into an import error instead.
+
+#### 2. `productReducers.js` — how state changes
+
+```js
+export const productListReducers = (state = { products: [] }, action) => {
+    switch (action.type) {
+        case PRODUCT_LIST_REQUEST:
+            return { loading: true, products: [] }
+        case PRODUCT_LIST_SUCCESS:
+            return { loading: false, products: action.payload }
+        case PRODUCT_LIST_FAIL:
+            return { loading: false, error: action.payload }
+        default:
+            return state
+    }
+}
+```
+
+The reducer is a **pure function** — no API calls, no side effects. It just receives the current state and an action, and returns a new state object. Redux calls it automatically every time an action is dispatched.
+
+`state = { products: [] }` — the default parameter sets the initial state for this slice. On first load, before any action is dispatched, the store starts with `{ products: [] }`.
+
+The `switch` compares `action.type` (a string) against the constants. When one matches it returns a new object — it never mutates the existing state.
+
+#### 3. `productActions.js` — the async work
+
+```js
+export const listProducts = () => async (dispatch) => {
+    try {
+        dispatch({ type: PRODUCT_LIST_REQUEST })
+
+        const { data } = await axios.get('/api/products/')
+
+        dispatch({ type: PRODUCT_LIST_SUCCESS, payload: data })
+
+    } catch (error) {
+        dispatch({
+            type: PRODUCT_LIST_FAIL,
+            payload: error.response && error.response.data.message
+                ? error.response.data.message
+                : error.message,
+        })
+    }
+}
+```
+
+`listProducts` is an **action creator** — a function that returns another function (the thunk pattern). Without `redux-thunk`, Redux only accepts plain objects like `{ type: '...' }`. With thunk, you can dispatch a function, and thunk will call it with `dispatch` so you can dispatch real actions after async work completes.
+
+The three dispatches map directly to the three reducer cases:
+
+| Dispatch | Reducer case | New state |
+|---|---|---|
+| `PRODUCT_LIST_REQUEST` | `case PRODUCT_LIST_REQUEST` | `{ loading: true, products: [] }` |
+| `PRODUCT_LIST_SUCCESS` | `case PRODUCT_LIST_SUCCESS` | `{ loading: false, products: [...] }` |
+| `PRODUCT_LIST_FAIL` | `case PRODUCT_LIST_FAIL` | `{ loading: false, error: '...' }` |
+
+#### 4. `Store.jsx` — wiring it all together
+
+```js
+import { legacy_createStore as createStore, combineReducers, applyMiddleware } from 'redux'
+import { thunk } from 'redux-thunk'
+import { composeWithDevTools } from '@redux-devtools/extension'
+import { productListReducers } from './reducers/productReducers.js'
+
+const reducer = combineReducers({
+    productList: productListReducers,   // more slices added here as app grows
+})
+
+const initialState = {}
+
+const middleware = [thunk]
+
+const store = createStore(
+    reducer,
+    initialState,
+    composeWithDevTools(applyMiddleware(...middleware))
+)
+
+export default store
+```
+
+`combineReducers` merges multiple reducers into one. The key name (`productList`) becomes the key on the store state — so components access it as `state.productList`.
+
+`applyMiddleware(thunk)` — plugs thunk into Redux so async action creators work.
+
+`composeWithDevTools` — connects the Redux DevTools browser extension so you can inspect every action and state change in Chrome DevTools.
+
+`legacy_createStore` — Redux 5 renamed `createStore` to signal it's the "old" API (Redux Toolkit is the modern recommended approach). It works identically — `as createStore` just aliases it so the rest of the code stays the same as the course.
+
+---
+
+### How a component uses the store
+
+Two hooks connect a component to Redux:
+
+```js
+const dispatch = useDispatch()    // lets you send actions to the store
+const { loading, error, products } = useSelector(state => state.productList)
+                                                              ↑
+                                            matches the key in combineReducers
+```
+
+`useSelector` subscribes the component to that slice of state — whenever `state.productList` changes, the component re-renders automatically.
+
+`useDispatch` gives you the `dispatch` function — you call it with an action or action creator to trigger a state change.
+
+---
+
+### The complete flow — from click to render
+
+```
+HomeScreen mounts
+    │
+    └─ useEffect → dispatch(listProducts())
+                            │
+                    thunk intercepts (it's a function, not a plain object)
+                            │
+                    thunk calls: async (dispatch) => { ... }
+                            │
+                    ①  dispatch({ type: PRODUCT_LIST_REQUEST })
+                            │
+                        Redux → productListReducers
+                            │
+                        returns { loading: true, products: [] }
+                            │
+                        store updates
+                            │
+                        HomeScreen re-renders → shows loading spinner
+                            │
+                    ②  await axios.get('/api/products/')  ← hits Django
+                            │
+                        Django → serializer → JSON response
+                            │
+                    ③  dispatch({ type: PRODUCT_LIST_SUCCESS, payload: data })
+                            │
+                        Redux → productListReducers
+                            │
+                        returns { loading: false, products: [...] }
+                            │
+                        store updates
+                            │
+                        HomeScreen re-renders → shows product cards
+```
+
+If the axios call fails instead:
+```
+    ③  dispatch({ type: PRODUCT_LIST_FAIL, payload: error.message })
+            │
+        returns { loading: false, error: 'Network Error' }
+            │
+        HomeScreen re-renders → shows error message
+```
+
+---
+
+### Package notes — version differences from the course
+
+The course uses older packages incompatible with Redux 5. Here's what changed and why:
+
+| Course code | Your code | Why |
+|---|---|---|
+| `import thunk from 'redux-thunk'` | `import { thunk } from 'redux-thunk'` | v3 removed default export |
+| `from 'redux-devtools-extension'` | `from '@redux-devtools/extension'` | package was renamed/moved |
+| `configureStore` from `'redux'` | `legacy_createStore` from `'redux'` | `configureStore` lives in Redux Toolkit, not `redux` |
 
 ---
 
