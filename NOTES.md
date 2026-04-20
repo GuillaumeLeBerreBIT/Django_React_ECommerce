@@ -1307,4 +1307,226 @@ The course uses older packages incompatible with Redux 5. Here's what changed an
 
 ---
 
+---
+
+### Product List Reducer & Action (video 21) + Product Details (video 22)
+
+**Files created/updated:**
+- `frontend/src/constants/productConstants.js` — six action type constants (list + details)
+- `frontend/src/reducers/productReducers.js` — two reducers: `productListReducers`, `productDetailsReducers`
+- `frontend/src/actions/productActions.js` — two async action creators: `listProducts`, `listProductDetails`
+- `frontend/src/Store.jsx` — registered `productDetailsReducers` in `combineReducers`
+- `frontend/src/pages/HomeScreen.jsx` — replaced local `useState`/axios with Redux `useDispatch`/`useSelector`
+- `frontend/src/pages/ProductScreen.jsx` — same pattern, wired to `productDetails` slice
+
+---
+
+### Constants — one file per feature, unique strings
+
+```js
+// productConstants.js
+export const PRODUCT_LIST_REQUEST    = 'PRODUCT_LIST_REQUEST'
+export const PRODUCT_LIST_SUCCESS    = 'PRODUCT_LIST_SUCCESS'
+export const PRODUCT_LIST_FAIL       = 'PRODUCT_LIST_FAIL'
+
+export const PRODUCT_DETAILS_REQUEST = 'PRODUCT_DETAILS_REQUEST'
+export const PRODUCT_DETAILS_SUCCESS = 'PRODUCT_DETAILS_SUCCESS'
+export const PRODUCT_DETAILS_FAIL    = 'PRODUCT_DETAILS_FAIL'
+```
+
+Each feature (products, cart, user) gets its own constants file with unique strings. Both the action creator and its matching reducer import from the same file — this ensures they always use the identical string, turning typos into import errors rather than silent bugs.
+
+The naming convention `FEATURE_ACTION_STATUS` keeps strings globally unique so two reducers never accidentally react to the same dispatch.
+
+---
+
+### Two reducers — one per feature slice
+
+```js
+// productListReducers — handles the product list page
+export const productListReducers = (state = { products: [] }, action) => {
+    switch (action.type) {
+        case PRODUCT_LIST_REQUEST:
+            return { loading: true, products: [] }
+        case PRODUCT_LIST_SUCCESS:
+            return { loading: false, products: action.payload }
+        case PRODUCT_LIST_FAIL:
+            return { loading: false, error: action.error }
+        default:
+            return state
+    }
+}
+
+// productDetailsReducers — handles the single product page
+export const productDetailsReducers = (state = { product: { reviews: [] } }, action) => {
+    switch (action.type) {
+        case PRODUCT_DETAILS_REQUEST:
+            return { loading: true, ...state }
+        case PRODUCT_DETAILS_SUCCESS:
+            return { loading: false, product: action.payload }
+        case PRODUCT_DETAILS_FAIL:
+            return { loading: false, error: action.error }
+        default:
+            return state
+    }
+}
+```
+
+**Why two separate reducers instead of one?**
+Each reducer owns one slice of state. Keeping them separate means a dispatch to `PRODUCT_LIST_REQUEST` only affects `state.productList` — `state.productDetails` is untouched. If they were merged, fetching the list could accidentally wipe the currently viewed product.
+
+**`...state` in `PRODUCT_DETAILS_REQUEST`:**
+```js
+case PRODUCT_DETAILS_REQUEST:
+    return { loading: true, ...state }
+```
+The spread `...state` copies the existing `product` into the new state object. This means while a new product is loading, the previous product data stays visible rather than disappearing. `productListReducers` resets `products: []` on request instead — a deliberate difference, since a blank list while refreshing is acceptable.
+
+**Initial state shapes:**
+
+| Reducer | Initial state | Why |
+|---|---|---|
+| `productListReducers` | `{ products: [] }` | `products.map()` is called on first render — needs an array |
+| `productDetailsReducers` | `{ product: { reviews: [] } }` | `product.reviews` may be mapped — needs an array inside |
+
+---
+
+### Two action creators — one per feature
+
+```js
+// listProducts — fetches the full product list
+export const listProducts = () => async (dispatch) => {
+    try {
+        dispatch({ type: PRODUCT_LIST_REQUEST })
+        const { data } = await axios.get('/api/products/')
+        dispatch({ type: PRODUCT_LIST_SUCCESS, payload: data })
+    } catch (error) {
+        dispatch({
+            type: PRODUCT_LIST_FAIL,
+            error: error.response && error.response.data.message
+                ? error.response.data.message
+                : error.message,
+        })
+    }
+}
+
+// listProductDetails — fetches a single product by id
+export const listProductDetails = (id) => async (dispatch) => {
+    try {
+        dispatch({ type: PRODUCT_DETAILS_REQUEST })
+        const { data } = await axios.get(`/api/products/${id}`)
+        dispatch({ type: PRODUCT_DETAILS_SUCCESS, payload: data })
+    } catch (error) {
+        dispatch({
+            type: PRODUCT_DETAILS_FAIL,
+            error: error.response && error.response.data.message
+                ? error.response.data.message
+                : error.message,
+        })
+    }
+}
+```
+
+`listProducts` takes no arguments — it always fetches all products.
+`listProductDetails` takes `id` — passed in from `useParams()` in the component, then interpolated into the URL.
+
+**The error message pattern:**
+```js
+error.response && error.response.data.message
+    ? error.response.data.message   // Django sent a structured error message
+    : error.message                 // fallback: generic JS error (e.g. 'Network Error')
+```
+Django REST Framework returns errors as `{ message: '...' }` in the response body. If that exists, use it. Otherwise fall back to the raw JS error message.
+
+---
+
+### Store — registering both reducers
+
+```js
+const reducer = combineReducers({
+    productList:    productListReducers,     // state.productList
+    productDetails: productDetailsReducers,  // state.productDetails
+})
+
+const initialState = {
+    productList: { products: [] }   // prevents .map() crash before first fetch
+}
+```
+
+`initialState` in `createStore` overrides reducer defaults for the matching slice. `productList` needs an explicit `{ products: [] }` here because otherwise the store starts with `{}` and `products` is `undefined` on the first render — crashing `.map()`.
+
+`productDetails` doesn't need an entry in `initialState` because its default `{ product: { reviews: [] } }` is safe to render with before any fetch completes.
+
+---
+
+### Connecting components to the store
+
+**HomeScreen — reading `state.productList`:**
+
+```js
+const dispatch = useDispatch()
+const productList = useSelector((state) => state.productList)
+const { loading, error, products } = productList
+
+useEffect(() => {
+    dispatch(listProducts())
+}, [dispatch])
+```
+
+**ProductScreen — reading `state.productDetails`:**
+
+```js
+const { id } = useParams()
+const dispatch = useDispatch()
+const productDetails = useSelector((state) => state.productDetails)
+const { loading, error, product } = productDetails
+
+useEffect(() => {
+    dispatch(listProductDetails(id))
+}, [id, dispatch])
+```
+
+**`useSelector`** — subscribes the component to a slice of the store. The selector function `(state) => state.productList` picks exactly what this component needs. When that slice changes, React re-renders the component automatically.
+
+**`useDispatch`** — gives you the `dispatch` function. You call it with an action creator to trigger the async flow.
+
+**`useParams`** — from React Router, reads the `:id` from the URL (e.g. `/product/3` → `id = '3'`). Passed into `listProductDetails(id)` so the correct product is fetched.
+
+---
+
+### Loading/error guard pattern
+
+Both screens use the same three-state ternary to handle the async lifecycle:
+
+```jsx
+{loading ? (
+    <Loader />                              // fetch in progress
+) : error ? (
+    <Message variant="danger">{error}</Message>  // fetch failed
+) : (
+    <Row>...</Row>                          // fetch succeeded, render data
+)}
+```
+
+This is essential because on the very first render — before the `useEffect` dispatch has even fired — `product` is the initial state default `{ reviews: [] }`. Without the guard, JSX would try `product.image` on an object that has no `image` field, crashing with `Cannot read properties of undefined`.
+
+The guard ensures the JSX that accesses product fields only runs in the third branch, after `PRODUCT_DETAILS_SUCCESS` has set a real product into the store.
+
+---
+
+### How dispatch knows which reducer to call — summary
+
+Redux broadcasts every dispatched action to **all** registered reducers. Each reducer uses its `switch` statement to decide if the action is relevant to it:
+
+```
+dispatch({ type: 'PRODUCT_LIST_REQUEST' })
+    │
+    ├──► productListReducers   → case matches → returns { loading: true, products: [] }
+    └──► productDetailsReducers → no match   → default → returns state unchanged
+```
+
+This is why unique constant strings matter — if two reducers shared the same string, both would react to the same dispatch, corrupting unrelated state.
+
+---
+
 *More sections will be added as the course progresses.*
