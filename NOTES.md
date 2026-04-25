@@ -10,6 +10,7 @@
 - [Project Overview](#project-overview)
 - [Section 1 — Project Setup & Frontend Scaffold](#section-1--project-setup--frontend-scaffold)
 - [Section 2 — Starting the Front End](#section-2--starting-the-front-end)
+- [Section 5 — Adding to Shopping Cart](#section-5--adding-to-shopping-cart)
 
 ---
 
@@ -1526,6 +1527,306 @@ dispatch({ type: 'PRODUCT_LIST_REQUEST' })
 ```
 
 This is why unique constant strings matter — if two reducers shared the same string, both would react to the same dispatch, corrupting unrelated state.
+
+---
+
+---
+
+## Section 5 — Adding to Shopping Cart
+
+### What was built
+
+A fully functional cart system: add items, change quantity, remove items, and persist the cart across page refreshes via `localStorage`.
+
+**Files created:**
+- `frontend/src/constants/cartConstants.js` — `CART_ADD_ITEM` and `CART_REMOVE_ITEM` action type strings
+- `frontend/src/actions/cartActions.js` — two async action creators: `addToCart`, `removeFromCart`
+- `frontend/src/reducers/cartReducers.js` — `cartReducer` handling add and remove
+- `frontend/src/pages/CartScreen.jsx` — the cart page UI
+
+**Files updated:**
+- `frontend/src/Store.jsx` — registered `cartReducer` in `combineReducers`; hydrates cart from `localStorage` on startup
+- `frontend/src/pages/ProductScreen.jsx` — added qty dropdown and "Add to Cart" button that dispatches `addToCart`
+
+---
+
+### cartConstants.js — action type strings
+
+```js
+export const CART_ADD_ITEM    = 'CART_ADD_ITEM'
+export const CART_REMOVE_ITEM = 'CART_REMOVE_ITEM'
+```
+
+Same pattern as product constants — shared strings imported by both the action creator and the reducer so a typo becomes an import error, not a silent bug.
+
+---
+
+### cartActions.js — two action creators
+
+```js
+export const addToCart = (id, qty) => async (dispatch, getState) => {
+    const { data } = await axios.get(`/api/products/${id}`)
+
+    dispatch({
+        type: CART_ADD_ITEM,
+        payload: {
+            product: data._id,
+            name: data.name,
+            image: data.image,
+            price: data.price,
+            countInStock: data.countInStock,
+            qty
+        }
+    })
+
+    localStorage.setItem('cartItems', JSON.stringify(getState().cart.cartItems))
+}
+
+export const removeFromCart = (id) => (dispatch, getState) => {
+    dispatch({ type: CART_REMOVE_ITEM, payload: id })
+    localStorage.setItem('cartItems', JSON.stringify(getState().cart.cartItems))
+}
+```
+
+**Key points:**
+
+- `addToCart` is `async` because it fetches the product from the API first — it builds the cart item from live data, not from whatever the component already has
+- `removeFromCart` is NOT async — no API call needed, it just dispatches the id to remove
+- Both call `getState().cart.cartItems` **after** dispatching — the dispatch has already updated the store, so `getState()` returns the new state, which is what gets saved to `localStorage`
+- `dispatch` and `getState` are **injected by Redux thunk** — you never pass them yourself; thunk intercepts the returned function and calls it with those two arguments automatically
+
+**Why `getState()` after dispatch gives updated state:**
+```
+dispatch(CART_ADD_ITEM)
+    → Redux calls cartReducer
+        → reducer returns new state
+            → store updates
+                → getState() now reflects that new state
+                    → localStorage.setItem(...)  ← saves the updated cart
+```
+
+---
+
+### cartReducers.js — add and remove logic
+
+```js
+export const cartReducer = (state = { cartItems: [] }, action) => {
+  switch (action.type) {
+
+    case CART_ADD_ITEM:
+      const item = action.payload;
+      const existItem = state.cartItems.find((x) => x.product === item.product);
+
+      if (existItem) {
+        // product already in cart — replace the whole item (qty is baked in)
+        return {
+          ...state,
+          cartItems: state.cartItems.map((x) =>
+            x.product === existItem.product ? item : x
+          ),
+        };
+      } else {
+        // new product — append it
+        return {
+          ...state,
+          cartItems: [...state.cartItems, item],
+        };
+      }
+
+    case CART_REMOVE_ITEM:
+      return {
+        ...state,
+        cartItems: state.cartItems.filter((i) => i.product !== action.payload)
+      }
+
+    default:
+      return state;
+  }
+};
+```
+
+**Add logic:**
+The reducer asks "is this product already in the cart?" using `.find()`. If yes, it **replaces** the whole item (not just increments) — the correct qty was already calculated before dispatch. If no, it appends.
+
+**Remove logic:**
+`.filter()` returns a new array excluding the item whose `product` id matches the payload. Redux state must never be mutated — filter creates a new array instead of splicing the old one.
+
+**Why replace instead of increment:**
+The qty is set by the user in the dropdown on `ProductScreen` before they click Add to Cart. By the time the reducer sees the item, the payload already contains `qty: 3` (or whatever they chose). The reducer just decides *where* to put it.
+
+---
+
+### Store.jsx — cart slice and localStorage hydration
+
+```js
+const cartItemsFromStorage = localStorage.getItem('cartItems')
+    ? JSON.parse(localStorage.getItem('cartItems'))
+    : []
+
+const initialState = {
+    productList: { products: [] },
+    cart: { cartItems: cartItemsFromStorage }  // pre-populate from localStorage
+}
+
+const reducer = combineReducers({
+    productList:    productListReducers,
+    productDetails: productDetailsReducers,
+    cart:           cartReducer               // new slice
+})
+```
+
+On every page load, the store checks `localStorage` for saved cart items. If they exist, they become the initial state — the cart persists across browser refreshes.
+
+**localStorage vs Redux state:**
+| | Redux store | localStorage |
+|---|---|---|
+| Lives in | Browser memory (RAM) | Browser disk |
+| Survives refresh | No | Yes |
+| Updated | On every dispatch | Manually after dispatch |
+
+---
+
+### CartScreen.jsx — the cart page
+
+```jsx
+export default function CartScreen() {
+  const { id } = useParams()
+  const [searchParams] = useSearchParams()
+  const qty = Number(searchParams.get('qty')) || 1
+
+  const dispatch = useDispatch()
+  const { cartItems } = useSelector(state => state.cart)
+
+  useEffect(() => {
+    if (id) {
+      dispatch(addToCart(id, qty))  // runs when navigating to /cart/:id?qty=N
+    }
+  }, [dispatch, id, qty])
+
+  function removeFromCartHandler(id) {
+    dispatch(removeFromCart(id))
+  }
+
+  return (
+    <Row>
+      <Col md={8}>
+        {/* cart items list */}
+        <ListGroup>
+          {cartItems.map(item => (
+            <ListGroup.Item key={item.product}>
+              <Row>
+                <Col md={2}><Image src={item.image} fluid rounded /></Col>
+                <Col md={3}><Link to={`/product/${item.product}`}>{item.name}</Link></Col>
+                <Col md={2}>${item.price}</Col>
+                <Col md={3}>
+                  {/* qty dropdown — dispatches addToCart with new qty on change */}
+                  <Form.Control as="select" value={item.qty}
+                    onChange={(e) => dispatch(addToCart(item.product, Number(e.target.value)))}>
+                    {[...Array(item.countInStock).keys()].map((x) => (
+                      <option key={x + 1} value={x + 1}>{x + 1}</option>
+                    ))}
+                  </Form.Control>
+                </Col>
+                <Col md={1}>
+                  <Button variant="light" onClick={() => removeFromCartHandler(item.product)}>
+                    <i className="fas fa-trash"></i>
+                  </Button>
+                </Col>
+              </Row>
+            </ListGroup.Item>
+          ))}
+        </ListGroup>
+      </Col>
+
+      <Col md={4}>
+        <Card>
+          <ListGroup variant="flush">
+            <ListGroup.Item>
+              <h2>Subtotal ({cartItems.reduce((acc, item) => acc + item.qty, 0)})</h2>
+              ${cartItems.reduce((acc, item) => acc + item.price * item.qty, 0).toFixed(2)}
+            </ListGroup.Item>
+            <ListGroup.Item>
+              <Button disabled={cartItems.length === 0}>Proceed to Checkout</Button>
+            </ListGroup.Item>
+          </ListGroup>
+        </Card>
+      </Col>
+    </Row>
+  )
+}
+```
+
+**The qty dropdown trick:**
+```js
+[...Array(item.countInStock).keys()].map((x) => (
+  <option key={x + 1} value={x + 1}>{x + 1}</option>
+))
+```
+`Array(10)` creates 10 empty slots — `.map()` skips empty slots. `.keys()` returns the indices `[0..9]` as an iterator, spread into a real array. Then `x + 1` shifts from 0-based to 1-based so options show 1 through 10.
+
+**The subtotal with `.reduce()`:**
+```js
+cartItems.reduce((acc, item) => acc + item.qty, 0)        // total item count
+cartItems.reduce((acc, item) => acc + item.price * item.qty, 0).toFixed(2)  // total price
+```
+`.reduce()` accumulates a running total across all items. `acc` starts at `0`, each iteration adds the current item's contribution.
+
+---
+
+### React Router v5 → v6 differences encountered this section
+
+| Feature | v5 (course) | v6 (what you used) |
+|---|---|---|
+| Navigate programmatically | `history.push('/path')` prop | `const navigate = useNavigate()` → `navigate('/path')` |
+| Read query string | `location.search` prop | `const [searchParams] = useSearchParams()` → `searchParams.get('qty')` |
+| Go back | `history.goBack()` | `navigate(-1)` |
+
+---
+
+### The full cart data flow
+
+```
+User clicks "Add to Cart" on ProductScreen
+    ↓
+addToCartHandler() → navigate(`/cart/${id}?qty=${qty}`)
+    ↓
+CartScreen mounts with id and qty from URL
+    ↓
+useEffect → dispatch(addToCart(id, qty))
+    ↓
+addToCart fetches product from Django API
+    ↓
+dispatch({ type: CART_ADD_ITEM, payload: { ...productData, qty } })
+    ↓
+cartReducer: item exists? replace : append
+    ↓
+getState().cart.cartItems → save to localStorage
+    ↓
+CartScreen re-renders with updated cartItems
+```
+
+---
+
+### Key Concepts from this Section
+
+**Thunk injects `dispatch` and `getState` automatically**
+When you return a function from an action creator, Redux thunk intercepts it and calls it with `(dispatch, getState)`. You never pass those yourself — thunk handles it because it's registered as middleware.
+
+**State immutability**
+Redux reducers must never mutate existing state. Always return a new object/array:
+- Add item: `[...state.cartItems, item]` — new array
+- Replace item: `.map()` — new array
+- Remove item: `.filter()` — new array
+
+**`getState()` order matters**
+Calling `getState()` after `dispatch()` gives you the **already-updated** state. The reducer runs synchronously during dispatch, so by the time the next line executes, the store reflects the change.
+
+**localStorage as a persistence layer**
+Redux resets on page refresh. `localStorage` survives it. The pattern here:
+1. After every cart change, serialize cart to `localStorage`
+2. On store init, read `localStorage` → set as `initialState`
+
+This two-way sync is manual — you maintain it yourself (no automatic Redux-localStorage binding).
 
 ---
 

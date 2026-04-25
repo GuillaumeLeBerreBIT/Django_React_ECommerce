@@ -1,7 +1,7 @@
-import React, { useEffect } from "react";
-import { Link, useParams } from "react-router-dom";
+import React, { useEffect, useState } from "react";
+import { Link, useParams, useNavigate } from "react-router-dom";
 import { useDispatch, useSelector } from "react-redux";
-import { Row, Col, Image, ListGroup, Button, Card } from "react-bootstrap";
+import { Row, Col, Image, ListGroup, Button, Card, Form } from "react-bootstrap";
 import Rating from "../components/Rating";
 import Loader from "../components/Loader";
 import Message from "../components/Message";
@@ -9,7 +9,10 @@ import { listProductDetails } from '../actions/productActions'
 
 export default function ProductScreen() {
   const { id } = useParams();
+  const navigate = useNavigate()
   // const product = products.find((p) => p._id === id);
+
+  const [qty, setQty] = useState(1)
 
   const dispatch = useDispatch()
   const productDetails = useSelector(state => state.productDetails);
@@ -19,6 +22,10 @@ export default function ProductScreen() {
 
     dispatch(listProductDetails(id))
   }, [id, dispatch])
+
+  function addToCartHandler () {
+    navigate(`/cart/${id}?qty=${qty}`)
+  }
 
   return (
     <div>
@@ -75,10 +82,28 @@ export default function ProductScreen() {
                   className="w-100"
                   type="button"
                   disabled={product.countInStock === 0}
+                  onClick={addToCartHandler}
                 >
                   Add to cart
                 </Button>
               </ListGroup.Item>
+
+              {product.countInStock > 0 && (
+                <ListGroup.Item>
+                  <Row>
+                    <Col>Qty</Col>
+                    <Col xs="auto" className="my-1">
+                      <Form.Control as="select" value={qty} onChange={(e) => {setQty(Number(e.target.value))}}>
+                        {
+                          [...Array(product.countInStock).keys()].map((x) => (
+                            <option key={x + 1} value={x + 1}>{x + 1}</option>
+                          ))
+                        }
+                      </Form.Control>
+                    </Col>
+                  </Row>
+                </ListGroup.Item>
+              )}
             </ListGroup>
           </Card>
         </Col>
