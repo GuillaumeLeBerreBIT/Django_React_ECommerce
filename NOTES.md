@@ -11,6 +11,7 @@
 - [Section 1 — Project Setup & Frontend Scaffold](#section-1--project-setup--frontend-scaffold)
 - [Section 2 — Starting the Front End](#section-2--starting-the-front-end)
 - [Section 5 — Adding to Shopping Cart](#section-5--adding-to-shopping-cart)
+- [Section 6 — Backend User Authentication](#section-6--backend-user-authentication)
 
 ---
 
@@ -1827,6 +1828,335 @@ Redux resets on page refresh. `localStorage` survives it. The pattern here:
 2. On store init, read `localStorage` → set as `initialState`
 
 This two-way sync is manual — you maintain it yourself (no automatic Redux-localStorage binding).
+
+---
+
+---
+
+## Section 6 — Backend User Authentication
+
+### What was built
+
+A complete JWT-based authentication system on the Django backend: login endpoint, protected routes, user profile, and admin-only routes.
+
+**Files created/updated:**
+- `backend/api/serializers.py` — `UserSerializer`, `UserSerializerWithToken` (extends UserSerializer with a JWT access token)
+- `backend/api/views.py` — `MyTokenObtainPairSerializer`, `MyTokenObtainPairView`, `GetUserProfile`, `GetUsers`
+- `backend/api/urls.py` — new routes for login, profile, and user list
+- `backend/backend/settings.py` — `REST_FRAMEWORK` default auth class + `SIMPLE_JWT` config
+
+---
+
+### Why JWT instead of sessions
+
+Django's default authentication uses **sessions** — the server stores a session record and sends a cookie to the browser. This works for traditional server-rendered apps but has problems for a React SPA:
+
+| Sessions | JWT |
+|---|---|
+| State stored on the server | Stateless — all data is in the token |
+| Tied to cookies | Sent as a header (`Authorization: Bearer <token>`) |
+| Doesn't work well across origins | Works across any client (React, mobile, etc.) |
+| Hard to scale horizontally | No server-side state to sync |
+
+JWT (JSON Web Token) is a signed string the server issues on login. The client stores it and sends it with every request. The server verifies the signature without touching a database.
+
+```
+Login → server issues token → client stores it
+Every request → client sends token in header → server verifies signature → grants/denies access
+```
+
+---
+
+### settings.py — JWT configuration
+
+```python
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    )
+}
+
+from datetime import timedelta
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(days=30),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
+    "ALGORITHM": "HS256",
+    "SIGNING_KEY": SECRET_KEY,
+    "AUTH_HEADER_TYPES": ("Bearer",),
+}
+```
+
+**`DEFAULT_AUTHENTICATION_CLASSES`** — tells DRF to look for a JWT token in the `Authorization` header on every request, instead of checking for a session cookie.
+
+**`ACCESS_TOKEN_LIFETIME: timedelta(days=30)`** — access tokens expire after 30 days. In production you'd set this much shorter (minutes/hours) and use refresh tokens to get new ones. 30 days is convenient for development.
+
+**`ALGORITHM: "HS256"`** — the signing algorithm. HS256 is symmetric (same key signs and verifies). The token is signed with `SECRET_KEY` from Django's settings — keep that secret in production.
+
+**`AUTH_HEADER_TYPES: ("Bearer",)`** — the token must be sent as:
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
+```
+
+---
+
+### serializers.py — UserSerializer and UserSerializerWithToken
+
+```python
+class UserSerializer(serializers.ModelSerializer):
+    name    = serializers.SerializerMethodField(read_only=True)
+    _id     = serializers.SerializerMethodField(read_only=True)
+    isAdmin = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = User
+        fields = ['_id', 'username', 'email', 'name', 'isAdmin']
+
+    def get__id(self, obj):
+        return obj.id
+
+    def get_isAdmin(self, obj):
+        return obj.is_staff
+
+    def get_name(self, obj):
+        name = obj.first_name
+        if name == '':
+            name = obj.email
+        return name
+```
+
+**`SerializerMethodField`** — a computed field backed by a method instead of a model column. DRF automatically calls `get_<fieldname>` to get the value:
+
+| Field name | Method called |
+|---|---|
+| `name` | `get_name()` |
+| `_id` | `get__id()` (double underscore — field name starts with `_`) |
+| `isAdmin` | `get_isAdmin()` |
+
+**Why use methods instead of direct model fields:**
+- `_id` — Django's User model uses `id`, but the frontend expects `_id` (MongoDB-style convention from earlier). The method renames it.
+- `isAdmin` — Django uses `is_staff` (snake_case). The method renames it to camelCase for React.
+- `name` — `first_name` might be empty. The method falls back to `email` if it is.
+
+**`obj` in each method** — the actual `User` instance being serialized. `Meta` is the blueprint (config), `obj` is the live data.
+
+---
+
+### UserSerializerWithToken — adding the JWT to the response
+
+```python
+class UserSerializerWithToken(UserSerializer):
+    token = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = User
+        fields = ['_id', 'username', 'email', 'name', 'isAdmin', 'token']
+
+    def get_token(self, obj):
+        token = RefreshToken.for_user(obj)
+        return str(token.access_token)
+```
+
+Extends `UserSerializer` — inherits all the same fields and methods, just adds `token` on top.
+
+`RefreshToken.for_user(obj)` — simplejwt generates a refresh token for this user. `.access_token` derives the access token from it. `str(...)` converts the token object to the JWT string (`eyJ...`).
+
+**Why two serializers:**
+- `UserSerializer` — used when you just need user data (profile page, user list)
+- `UserSerializerWithToken` — used only on login, where the client also needs the token to store
+
+---
+
+### views.py — custom login serializer and view
+
+```python
+class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
+    def validate(self, attrs):
+        data = super().validate(attrs)          # simplejwt validates credentials
+                                                # and sets self.user
+
+        serializer = UserSerializerWithToken(self.user).data
+
+        for k, v in serializer.items():
+            data[k] = v                         # merge user data into token response
+
+        return data
+
+class MyTokenObtainPairView(TokenObtainPairView):
+    serializer_class = MyTokenObtainPairSerializer
+```
+
+**Why subclass instead of using simplejwt directly:**
+By default, simplejwt's login endpoint only returns `{ access, refresh }` tokens. The React frontend also needs user info (name, email, isAdmin) immediately after login — without a second request. Subclassing lets you inject that data into the login response.
+
+**How `self.user` gets populated:**
+`super().validate(attrs)` calls simplejwt's parent implementation which:
+1. Calls Django's `authenticate(username, password)`
+2. Django's `ModelBackend` queries `auth_user` table and checks the hashed password
+3. If valid, sets `self.user = User instance`
+
+By the time your code runs after `super()`, `self.user` is already populated.
+
+**The merge loop:**
+```python
+for k, v in serializer.items():
+    data[k] = v
+```
+`data` starts as `{ access: '...', refresh: '...' }` from simplejwt. This loop adds `_id`, `username`, `email`, `name`, `isAdmin`, `token` — so the final response includes everything the frontend needs in one call.
+
+---
+
+### views.py — protected routes
+
+```python
+class GetUserProfile(APIView):
+    permission_classes = [IsAuthenticated]   # ← requires valid JWT token
+
+    def get(self, request):
+        user = request.user                  # ← simplejwt populates this from the token
+        serializer = UserSerializer(user, many=False)
+        return Response(serializer.data)
+
+
+class GetUsers(APIView):
+    permission_classes = [IsAdminUser]       # ← requires is_staff = True
+
+    def get(self, request):
+        users = User.objects.all()
+        serializer = UserSerializer(users, many=True)
+        return Response(serializer.data)
+```
+
+**`permission_classes`** — DRF's way to protect a view. Evaluated before the method body runs. If the check fails, DRF returns a `403 JSON response` — not a redirect (which would be useless for React).
+
+| Permission class | Allows |
+|---|---|
+| `IsAuthenticated` | Any user with a valid JWT |
+| `IsAdminUser` | Only users where `is_staff = True` |
+| `AllowAny` | Everyone, no token needed (default) |
+
+**`request.user`** — when a valid JWT is in the `Authorization` header, simplejwt's authentication class decodes it and sets `request.user` to the matching `User` instance automatically. No database lookup code needed in the view.
+
+**Plain Django equivalent:**
+```python
+# Plain Django — redirects to login page (bad for APIs)
+@login_required
+def my_view(request): ...
+
+# DRF — returns 403 JSON (correct for APIs)
+class MyView(APIView):
+    permission_classes = [IsAuthenticated]
+```
+
+---
+
+### urls.py — new routes
+
+```python
+urlpatterns = [
+    path('users/login/',   views.MyTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('users/profile/', views.GetUserProfile.as_view(),        name='get_user_profile'),
+    path('users/',         views.GetUsers.as_view(),              name='get_users'),
+    # ... existing product routes
+]
+```
+
+| Endpoint | Method | Auth required | Returns |
+|---|---|---|---|
+| `/api/users/login/` | POST | None | `{ access, refresh, _id, username, email, name, isAdmin, token }` |
+| `/api/users/profile/` | GET | Any authenticated user | User profile data |
+| `/api/users/` | GET | Admin only | All users |
+
+---
+
+### Serializer direction — outgoing vs incoming
+
+Serializers work in **both directions** — not just for sending data out:
+
+```python
+# Outgoing (DB → JSON) — no data= kwarg
+serializer = UserSerializer(user_instance)
+return Response(serializer.data)
+
+# Incoming (JSON → DB) — data= kwarg signals incoming
+serializer = UserSerializer(data=request.data)
+if serializer.is_valid():       # validates format, required fields, types
+    serializer.save()           # writes to DB
+else:
+    return Response(serializer.errors, status=400)
+```
+
+The serializer acts as a **two-way gatekeeper**:
+- **Outgoing:** converts Python objects to JSON-serializable dicts
+- **Incoming:** validates and cleans user-submitted data before it touches the database
+
+---
+
+### How Django's authenticate() works under the hood
+
+```python
+# Django's authenticate() — simplified
+def authenticate(request=None, **credentials):
+    for backend in registered_backends:
+        user = backend.authenticate(request, **credentials)
+        if user is None:
+            continue
+        user.backend = backend_path
+        return user
+    # no backend matched → fire login_failed signal
+```
+
+Django supports multiple authentication backends (e.g. username+password AND OAuth). `authenticate()` loops through all of them, returns the first `User` it gets back.
+
+The default backend is `ModelBackend`:
+```python
+# ModelBackend (simplified)
+def authenticate(self, request, username=None, password=None):
+    user = User.objects.get(username=username)   # DB lookup
+    if user.check_password(password):            # bcrypt hash check
+        return user
+    return None
+```
+
+**Full login chain:**
+```
+POST /api/users/login/ { username, password }
+        ↓
+MyTokenObtainPairView → MyTokenObtainPairSerializer.validate()
+        ↓
+super().validate() → simplejwt → Django authenticate()
+        ↓
+ModelBackend → User.objects.get() → check_password()
+        ↓
+self.user = User instance
+        ↓
+UserSerializerWithToken(self.user) → generates JWT + user data
+        ↓
+Response: { access, refresh, _id, username, email, name, isAdmin, token }
+        ↓
+React stores token → sends it in Authorization header on future requests
+        ↓
+simplejwt decodes token → sets request.user automatically
+```
+
+---
+
+### Key Concepts from this Section
+
+**JWT (JSON Web Token)**
+A signed string containing encoded user data. The server signs it with a secret key on login; any future request can be verified by checking the signature — no database lookup needed. Three parts: `header.payload.signature`, all base64-encoded.
+
+**`SerializerMethodField`**
+Lets you define a computed field backed by a Python method (`get_<fieldname>`). Used when the value needs logic (renaming, fallbacks, generating tokens) rather than just reading a model column directly.
+
+**`self.user` in simplejwt**
+Set automatically by `TokenObtainPairSerializer`'s `validate()` after credentials are verified. Not a DRF convention — specific to simplejwt. Always call `super().validate()` first or `self.user` won't exist.
+
+**`permission_classes`**
+DRF's access control system. Evaluated before any view logic runs. Returns `403 JSON` on failure — never a redirect. Use `IsAuthenticated` for logged-in users, `IsAdminUser` for staff only, `AllowAny` for public endpoints.
+
+**`request.user`**
+When a valid JWT is in the `Authorization: Bearer <token>` header, DRF's JWT authentication class decodes it and populates `request.user` with the `User` instance — automatically, with no code needed in the view.
 
 ---
 
