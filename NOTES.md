@@ -2160,4 +2160,297 @@ When a valid JWT is in the `Authorization: Bearer <token>` header, DRF's JWT aut
 
 ---
 
+### User Registration — registerUser view
+
+```python
+class registerUser(APIView):
+
+    def post(self, request):
+        try:
+            data = request.data
+
+            user = User.objects.create(
+                first_name=data['name'],
+                username=data['email'],
+                email=data['email'],
+                password=make_password(data['password']),
+            )
+
+            serializer = UserSerializerWithToken(user, many=False)
+            return Response(serializer.data)
+        except:
+            message = {'detail': 'User with this email already exists'}
+            return Response(message, status.HTTP_400_BAD_REQUEST)
+```
+
+**Key points:**
+
+**`make_password()`** — never store passwords as plain text. `make_password()` from `django.contrib.auth.hashers` runs the password through Django's hashing algorithm (bcrypt by default) before saving. If you used `User.objects.create()` without it, the raw password would be stored in the database — a serious security hole.
+
+```python
+# Wrong — stores plain text
+User.objects.create(password=data['password'])
+
+# Correct — stores a bcrypt hash
+User.objects.create(password=make_password(data['password']))
+```
+
+**`username=data['email']`** — Django's `User` model requires a unique `username`. Since this app uses email-based login (not a separate username), both `username` and `email` are set to the same value. The `signals.py` file (see below) enforces this automatically going forward.
+
+**`UserSerializerWithToken` on registration** — after creating the user, the response includes the JWT token immediately. This means the frontend can log the user in straight after registration without a second login request.
+
+**`try/except` for duplicate emails** — `User.objects.create()` raises an `IntegrityError` if a user with that email/username already exists (database unique constraint). The bare `except` catches it and returns a readable error message with HTTP 400.
+
+---
+
+### signals.py — keeping username in sync with email
+
+```python
+from django.db.models.signals import pre_save
+from django.contrib.auth.models import User
+
+def updateUser(sender, instance, **kwargs):
+    user = instance
+    if user.email != '':
+        user.username = user.email
+
+pre_save.connect(updateUser, sender=User)
+```
+
+**What a Django signal is:**
+A signal is a hook that fires automatically when something happens in Django — before/after a model is saved, before/after it's deleted, etc. You subscribe a function to a signal and Django calls it at the right moment.
+
+```
+User.save() called
+    ↓
+Django fires pre_save signal
+    ↓
+updateUser() runs → sets username = email
+    ↓
+Django writes to database with updated username
+```
+
+**Why `pre_save` and not `post_save`:**
+`pre_save` fires **before** the record hits the database — so you can still modify `instance` and those changes get saved. `post_save` fires after — too late to modify the record being saved.
+
+**Why this signal exists:**
+Django's `User` model is built around `username` as the login identifier. But this app uses email for login. Without the signal, if a user updates their email via the profile page, their `username` would stay as the old email — breaking login. The signal keeps them in sync automatically on every save.
+
+| Event | Signal |
+|---|---|
+| Before save | `pre_save` |
+| After save | `post_save` |
+| Before delete | `pre_delete` |
+| After delete | `post_delete` |
+
+**`sender=User`** — limits the signal to only fire when a `User` model is saved, not every model in the entire app.
+
+**`instance`** — the actual `User` object about to be saved. Mutating `instance` here directly changes what gets written to the database.
+
+---
+
+### apps.py — registering signals
+
+```python
+class ApiConfig(AppConfig):
+    name = 'api'
+
+    def ready(self):
+        import api.signals
+```
+
+Django signals aren't loaded automatically — you have to import the signals file somewhere that runs on startup. `AppConfig.ready()` is Django's designated hook for startup code. It runs once when the app is fully loaded.
+
+Without this, `signals.py` would sit there doing nothing — the `pre_save` connection would never be registered and `updateUser` would never fire.
+
+**Why not just import signals at the top of `views.py`?**
+`views.py` is only imported when a request hits a view — not guaranteed to run at startup. `ready()` always runs at startup, making it the correct place.
+
+---
+
+### New URL route
+
+```python
+path('users/register/', views.registerUser.as_view(), name='register'),
+```
+
+| Endpoint | Method | Auth | Body | Returns |
+|---|---|---|---|---|
+| `/api/users/register/` | POST | None | `{ name, email, password }` | User data + JWT token |
+
+---
+
+### Registration vs Login flow comparison
+
+```
+REGISTRATION                          LOGIN
+─────────────────────────────         ─────────────────────────────
+POST /api/users/register/             POST /api/users/login/
+  { name, email, password }             { username (=email), password }
+        ↓                                     ↓
+User.objects.create(...)              authenticate(username, password)
+make_password(password)               ModelBackend → DB lookup
+        ↓                                     ↓
+User saved to database                self.user = User instance
+        ↓                                     ↓
+UserSerializerWithToken(user)         UserSerializerWithToken(self.user)
+        ↓                                     ↓
+Response: user data + token           Response: user data + token
+```
+
+Both return the same shape — the React frontend handles both the same way (stores the token, redirects the user).
+
+---
+
+### Refactoring — splitting views.py and urls.py into folders
+
+As the app grows, keeping all views in one `views.py` and all URLs in one `urls.py` becomes hard to navigate. The solution is to convert each into a **package** (a folder with an `__init__.py`) and split by feature.
+
+**Before:**
+```
+api/
+├── views.py        ← all views in one file
+└── urls.py         ← all urls in one file
+```
+
+**After:**
+```
+api/
+├── views/
+│   ├── __init__.py       ← makes views/ a Python package
+│   ├── user_views.py     ← login, register, profile, users list
+│   └── product_views.py  ← product list, single product
+├── urls/
+│   ├── user_urls.py      ← /api/users/* routes
+│   ├── product_urls.py   ← /api/products/* routes
+│   └── order_urls.py     ← /api/orders/* routes (future)
+└── _urls.py              ← old urls.py kept as reference (underscore = inactive)
+```
+
+**Why `__init__.py` is required:**
+Python only treats a folder as an importable package if it contains `__init__.py`. Without it, `from api.views import user_views` fails with `ImportError` because Python finds the old `views.py` file first, or doesn't recognise the folder at all.
+
+```
+Without __init__.py:
+  from api.views import user_views  →  ImportError: cannot import name 'user_views' from 'api.views'
+
+With __init__.py:
+  from api.views import user_views  →  ✓ imports api/views/user_views.py
+```
+
+**Gotcha — `views.py` and `views/` can't coexist:**
+If both `views.py` and `views/` exist, Python always picks the file (`views.py`) over the folder. The old `views.py` must be deleted (or renamed) for the package to be used. This was the cause of the `ImportError` encountered during refactoring.
+
+---
+
+### views/ — imports use `..` for relative paths
+
+Inside `views/user_views.py`, imports that used to be `from .models import ...` now need an extra dot because the file is one level deeper:
+
+```python
+# Before (views.py at api/ level)
+from .models import Product
+from .serializers import UserSerializer
+
+# After (user_views.py inside api/views/)
+from ..models import Product        # .. = go up one level to api/
+from ..serializers import UserSerializer
+```
+
+`..` means "parent package" — it navigates up from `api/views/` to `api/` where `models.py` and `serializers.py` live.
+
+---
+
+### urls/ — feature-based URL files
+
+Each URL file handles one feature prefix and imports only its relevant views module:
+
+**`user_urls.py`:**
+```python
+from api.views import user_views as views
+
+urlpatterns = [
+    path('login/',   views.MyTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('register/', views.registerUser.as_view(),         name='register'),
+    path('profile/', views.GetUserProfile.as_view(),        name='get_user_profile'),
+    path('',         views.GetUsers.as_view(),              name='get_users'),
+]
+```
+
+**`product_urls.py`:**
+```python
+from api.views import product_views as views
+
+urlpatterns = [
+    path('',         views.GetProducts.as_view(), name='get_products'),
+    path('<str:pk>', views.GetProduct.as_view(),  name='get_product'),
+]
+```
+
+Notice the paths here are **short** — no `users/` or `products/` prefix. The prefix is added in the project-level `urls.py` via `include()`.
+
+---
+
+### backend/urls.py — project-level router updated
+
+```python
+urlpatterns = [
+    path('admin/', admin.site.urls),
+    path('api/products/', include('api.urls.product_urls')),
+    path('api/users/',    include('api.urls.user_urls')),
+    path('api/orders/',   include('api.urls.order_urls')),
+]
+
+urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+```
+
+The old single `include('api.urls')` is replaced by three separate includes, one per feature. Each `include()` points to a dotted Python path to the URL module.
+
+**How the full URL is assembled:**
+
+```
+backend/urls.py prefix    +    feature urls.py path    =    full URL
+─────────────────────────────────────────────────────────────────────
+'api/users/'              +    'login/'                =    /api/users/login/
+'api/users/'              +    'register/'             =    /api/users/register/
+'api/users/'              +    'profile/'              =    /api/users/profile/
+'api/users/'              +    ''                      =    /api/users/
+'api/products/'           +    ''                      =    /api/products/
+'api/products/'           +    '<str:pk>'              =    /api/products/<pk>
+```
+
+**`static()` line:**
+```python
+urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+```
+Tells Django to serve uploaded media files (product images) during development. In production a web server like Nginx handles this instead.
+
+---
+
+### Final backend structure at end of Section 6
+
+```
+backend/
+├── manage.py
+├── backend/                        ← Django project config
+│   ├── settings.py                 ← JWT config, installed apps, CORS, media
+│   └── urls.py                     ← top-level router (admin + api/* includes)
+└── api/                            ← Django app
+    ├── apps.py                     ← registers signals on startup via ready()
+    ├── models.py                   ← Product, Order, Review, etc.
+    ├── serializers.py              ← UserSerializer, UserSerializerWithToken, ProductSerializer
+    ├── signals.py                  ← pre_save: keeps username in sync with email
+    ├── admin.py                    ← registers models in Django admin panel
+    ├── views/
+    │   ├── __init__.py
+    │   ├── user_views.py           ← login, register, profile, users list
+    │   └── product_views.py        ← product list, single product
+    └── urls/
+        ├── user_urls.py            ← /api/users/* routes
+        ├── product_urls.py         ← /api/products/* routes
+        └── order_urls.py           ← /api/orders/* routes (placeholder)
+```
+
+---
+
 *More sections will be added as the course progresses.*
