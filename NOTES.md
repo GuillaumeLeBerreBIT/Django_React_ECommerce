@@ -12,6 +12,7 @@
 - [Section 2 — Starting the Front End](#section-2--starting-the-front-end)
 - [Section 5 — Adding to Shopping Cart](#section-5--adding-to-shopping-cart)
 - [Section 6 — Backend User Authentication](#section-6--backend-user-authentication)
+- [Section 7 — User Login Reducer & Action](#section-7--user-login-reducer--action)
 
 ---
 
@@ -2449,6 +2450,301 @@ backend/
         ├── user_urls.py            ← /api/users/* routes
         ├── product_urls.py         ← /api/products/* routes
         └── order_urls.py           ← /api/orders/* routes (placeholder)
+```
+
+---
+
+---
+
+---
+
+## Section 7 — User Login Reducer & Action (Frontend)
+
+### What was built
+
+The frontend Redux layer for user authentication: constants, a reducer, an async action creator, and the store updated to persist login state across page refreshes.
+
+**Files created:**
+- `frontend/src/constants/userConstants.js` — four action type strings for login
+- `frontend/src/reducers/userReducers.js` — `userLoginReducers` handling the login lifecycle
+- `frontend/src/actions/userActions.js` — `login` async action creator, also handles logout
+
+**Files updated:**
+- `frontend/src/Store.jsx` — registered `userLoginReducers` in `combineReducers`; hydrates login state from `localStorage` on startup
+
+---
+
+### userConstants.js — four action type strings
+
+```js
+export const USER_LOGIN_REQUEST = 'USER_LOGIN_REQUEST'
+export const USER_LOGIN_SUCCESS = 'USER_LOGIN_SUCCESS'
+export const USER_LOGIN_FAIL    = 'USER_LOGIN_FAIL'
+export const USER_LOGOUT        = 'USER_LOGOUT'
+```
+
+Same pattern as products and cart — one constants file per feature, shared by both the action creator and the reducer. `USER_LOGOUT` is included here even though the reducer handles it passively (wiping state) and no API call is needed for it.
+
+---
+
+### userReducers.js — the login state machine
+
+```js
+export const userLoginReducers = (state = {}, action) => {
+  switch (action.type) {
+    case USER_LOGIN_REQUEST:
+      return { loading: true }
+    case USER_LOGIN_SUCCESS:
+      return { loading: false, userInfo: action.payload }
+    case USER_LOGIN_FAIL:
+      return { loading: false, error: action.error }
+    case USER_LOGOUT:
+      return {}
+    default:
+      return state
+  }
+}
+```
+
+**State shape at each stage:**
+
+| Action dispatched | New `state.userLogin` |
+|---|---|
+| `USER_LOGIN_REQUEST` | `{ loading: true }` |
+| `USER_LOGIN_SUCCESS` | `{ loading: false, userInfo: { name, email, token, isAdmin, ... } }` |
+| `USER_LOGIN_FAIL` | `{ loading: false, error: "Invalid credentials" }` |
+| `USER_LOGOUT` | `{}` — completely empty, userInfo wiped |
+
+**Why each case replaces the whole object (not spreads):**
+On `SUCCESS`, you don't want a stale `error` key from a previous failed attempt to linger. On `LOGOUT`, you want a guaranteed clean slate. Returning a fresh object is safer than `{ ...state, ... }` here.
+
+**Initial state is `{}`:**
+Unlike `productListReducers` which starts with `{ products: [] }` to prevent a crash on `.map()`, the login reducer's initial state can safely be empty — no component tries to `.map()` over `userInfo`.
+
+---
+
+### userActions.js — the login action creator
+
+```js
+export const login = (email, password) => async (dispatch) => {
+  try {
+    dispatch({ type: USER_LOGIN_REQUEST })
+
+    const config = {
+      headers: { 'Content-type': 'application/json' }
+    }
+
+    const { data } = await axios.post(
+      '/api/users/login/',
+      { username: email, password: password },
+      config
+    )
+
+    dispatch({ type: USER_LOGIN_SUCCESS, payload: data })
+
+    localStorage.setItem('userInfo', JSON.stringify(data))
+
+  } catch (error) {
+    dispatch({
+      type: USER_LOGIN_FAIL,
+      error: error.response && error.response.data.detail
+        ? error.response.data.detail
+        : error.message,
+    })
+  }
+}
+```
+
+**Step by step:**
+
+```
+dispatch(login(email, password))
+    ↓
+thunk intercepts → calls async (dispatch) => { ... }
+    ↓
+① dispatch USER_LOGIN_REQUEST
+   → state.userLogin = { loading: true }
+   → UI shows spinner
+    ↓
+② axios.post('/api/users/login/', { username: email, password })
+   → hits Django's MyTokenObtainPairView
+    ↓
+③a Django validates credentials → returns { _id, name, email, isAdmin, token, ... }
+   → dispatch USER_LOGIN_SUCCESS, payload: data
+   → state.userLogin = { loading: false, userInfo: { ... } }
+   → localStorage.setItem('userInfo', JSON.stringify(data))
+   → UI shows logged-in header
+    ↓
+③b Django returns 401
+   → dispatch USER_LOGIN_FAIL, error: "No active account..."
+   → state.userLogin = { loading: false, error: "..." }
+   → UI shows error message
+```
+
+**Why `username: email` in the POST body:**
+Django's default auth system authenticates with a field called `username`, even though this app collects email in the UI. The `signals.py` file on the backend keeps `username` and `email` in sync. So we send the email value under the `username` key to satisfy Django's expected field name.
+
+**Why the `Content-type` header:**
+Django REST Framework needs to know the body is JSON, not a form submission. Without this header, `request.data` on the Django side would be empty.
+
+**The error field key is `error`, not `payload`:**
+Note that `USER_LOGIN_FAIL` dispatches `error: ...` (not `payload: ...`). The reducer reads it as `action.error`. This is an inconsistency with how the product reducers work (they also use `action.error`) — just be consistent within your own project.
+
+**`localStorage.setItem` — no `getState()` needed here:**
+Unlike the cart action which called `getState()` to read the updated store, the login action already has `data` in scope (the raw axios response). It saves that directly, skipping the extra store read.
+
+---
+
+### Store.jsx — two additions
+
+**1. `userLogin` registered in `combineReducers`:**
+
+```js
+const reducer = combineReducers({
+    productList:    productListReducers,
+    productDetails: productDetailsReducers,
+    cart:           cartReducer,
+    userLogin:      userLoginReducers    // ← NEW
+})
+```
+
+The key `userLogin` is what components use in `useSelector(state => state.userLogin)`.
+
+**2. `userInfo` hydrated from `localStorage` on startup:**
+
+```js
+const userInfoFromStorage = localStorage.getItem('userInfo')
+    ? JSON.parse(localStorage.getItem('userInfo'))
+    : null
+
+const initialState = {
+    productList: { products: [] },
+    cart:        { cartItems: cartItemsFromStorage },
+    userLogin:   { userInfo: userInfoFromStorage }   // ← NEW
+}
+```
+
+On every page load, Redux checks `localStorage` for a previously saved `userInfo`. If it exists, the store starts with the user already logged in — so the nav bar shows their name and login persists across browser refreshes.
+
+**Full localStorage strategy in this app:**
+
+| What's persisted | Key in localStorage | When saved | When read |
+|---|---|---|---|
+| Cart items | `cartItems` | After every cart dispatch | Store init |
+| User info + token | `userInfo` | After successful login | Store init |
+
+---
+
+### `useEffect` — the hook that triggers async work after render
+
+`useEffect` runs code **after** the component renders, and only when the values in its dependency array have changed. It's the correct place for side effects like API calls and Redux dispatches.
+
+```js
+useEffect(() => {
+    // code to run
+}, [dependency1, dependency2])
+```
+
+| Dependency array | When it runs |
+|---|---|
+| No array | Every render (almost never what you want) |
+| `[]` | Once, when the component first mounts |
+| `[id, dispatch]` | Once on mount, then again whenever `id` or `dispatch` changes |
+
+**In this app's three screens:**
+
+```js
+// HomeScreen — fetch products once on mount
+useEffect(() => {
+    dispatch(listProducts())
+}, [dispatch])
+
+// ProductScreen — re-fetch when the URL product id changes
+useEffect(() => {
+    dispatch(listProductDetails(id))
+}, [id, dispatch])
+
+// CartScreen — add item to cart when the page loads with an id in the URL
+useEffect(() => {
+    if (id) {
+        dispatch(addToCart(id, qty))
+    }
+}, [dispatch, id, qty])
+```
+
+`dispatch` is listed in the dependency arrays because React's linting rules require it — in practice `dispatch` never actually changes, so those effects only run once.
+
+---
+
+### `useNavigate` — the v6 replacement for `history.push`
+
+In React Router v5 the course uses `history.push('/path')` to redirect programmatically. In v6 this no longer works — use `useNavigate` instead:
+
+```js
+import { useNavigate } from 'react-router-dom'
+
+const navigate = useNavigate()
+
+navigate('/')     // redirect to home
+navigate('/login') // redirect to login
+navigate(-1)      // go back one page (replaces history.goBack())
+```
+
+In `LoginScreen`, you'll use this after a successful login to redirect the user to the home page (or wherever they came from).
+
+---
+
+### The complete login data flow — end to end
+
+```
+User fills in email + password → clicks "Login"
+    ↓
+LoginScreen: dispatch(login(email, password))
+    ↓
+thunk → dispatch USER_LOGIN_REQUEST
+    → state.userLogin = { loading: true }
+    → <Loader /> spinner shows
+    ↓
+axios.post('/api/users/login/', { username: email, password })
+    ↓
+Django: MyTokenObtainPairView → authenticate() → issue token
+    ↓
+Response: { _id, name, email, isAdmin, token }
+    ↓
+dispatch USER_LOGIN_SUCCESS, payload: data
+    → state.userLogin = { loading: false, userInfo: { name, token, ... } }
+    ↓
+localStorage.setItem('userInfo', JSON.stringify(data))
+    → survives page refresh
+    ↓
+navigate('/') → redirect to home
+    → Header reads state.userLogin.userInfo → shows user name dropdown
+```
+
+---
+
+### Key Concepts from this Section
+
+**localStorage as persistent login**
+Redux resets on page refresh. `localStorage` does not. By reading `userInfo` from `localStorage` at store init, the user stays logged in across refreshes without re-entering credentials. The token stored there is sent in the `Authorization` header on future protected requests.
+
+**`useEffect` dependency array**
+Controls *when* the effect re-runs. An empty array `[]` means once on mount. Adding values like `[id]` means "re-run if `id` changes." Always include every variable the effect uses — React's linter enforces this.
+
+**`useNavigate` (v6) vs `history.push` (v5)**
+React Router v6 removed route props like `history`. All navigation is done via the `useNavigate` hook: `const navigate = useNavigate()` → `navigate('/path')`.
+
+**Error field key consistency**
+The login reducer reads `action.error` (not `action.payload`). This matches what the product reducers do on failure. Pick one convention and stick to it across your codebase.
+
+**Updated Redux state shape:**
+```
+store = {
+    productList:    { loading, error, products }
+    productDetails: { loading, error, product }
+    cart:           { cartItems }
+    userLogin:      { loading, error, userInfo }   ← NEW
+}
 ```
 
 ---
