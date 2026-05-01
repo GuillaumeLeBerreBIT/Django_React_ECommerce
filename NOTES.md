@@ -2749,4 +2749,227 @@ store = {
 
 ---
 
+### Register — constants, reducer, and action creator
+
+**Three new constants added to `userConstants.js`:**
+
+```js
+export const USER_REGISTER_REQUEST = 'USER_REGISTER_REQUEST'
+export const USER_REGISTER_SUCCESS = 'USER_REGISTER_SUCCESS'
+export const USER_REGISTER_FAIL    = 'USER_REGISTER_FAIL'
+```
+
+---
+
+**`userRegisterReducers` added to `userReducers.js`:**
+
+```js
+export const userRegisterReducers = (state = {}, action) => {
+  switch (action.type) {
+    case USER_REGISTER_REQUEST:
+      return { loading: true }
+    case USER_REGISTER_SUCCESS:
+      return { loading: false, userInfo: action.payload }
+    case USER_REGISTER_FAIL:
+      return { loading: false, error: action.error }
+    case USER_LOGOUT:
+      return {}
+    default:
+      return state
+  }
+}
+```
+
+Structurally identical to `userLoginReducers`. It lives in `state.userRegister` (its own slice) and only responds to `USER_REGISTER_*` actions — plus `USER_LOGOUT` to wipe its state on logout.
+
+---
+
+**`register` action creator added to `userActions.js`:**
+
+```js
+export const register = (name, email, password) => async (dispatch) => {
+  try {
+    dispatch({ type: USER_REGISTER_REQUEST })
+
+    const config = { headers: { 'Content-type': 'application/json' } }
+
+    const { data } = await axios.post(
+      '/api/users/register/',
+      { email, password, name },
+      config
+    )
+
+    dispatch({ type: USER_REGISTER_SUCCESS, payload: data })
+
+    dispatch({ type: USER_LOGIN_SUCCESS, payload: data })   // ← key line
+
+    localStorage.setItem('userInfo', JSON.stringify(data))
+
+  } catch (error) {
+    dispatch({
+      type: USER_REGISTER_FAIL,
+      error: error.response && error.response.data.detail
+        ? error.response.data.detail
+        : error.message,
+    })
+  }
+}
+```
+
+**Why `USER_LOGIN_SUCCESS` is dispatched inside the register action:**
+
+After a successful registration, the backend returns the same user data + token as a login response. Two things need to happen immediately:
+
+1. The user should be **logged in** — meaning `state.userLogin.userInfo` must be set
+2. The Header must **re-render** showing the user's name
+
+`state.userLogin` is exclusively managed by `userLoginReducers`. The only way to update it is to dispatch an action it recognises — `USER_LOGIN_SUCCESS`. Redux broadcasts every dispatch to all reducers, so dispatching `USER_LOGIN_SUCCESS` here triggers `userLoginReducers` even though we're inside the register flow:
+
+```
+dispatch(USER_LOGIN_SUCCESS, payload: data)
+    ↓
+├── userRegisterReducers → no match → state unchanged
+└── userLoginReducers    → case USER_LOGIN_SUCCESS matches!
+                           → state.userLogin = { userInfo: data }
+                           → Header re-renders with user's name
+```
+
+**`localStorage` vs live Redux — why both are needed:**
+
+`localStorage.setItem` only helps on **page refresh** — the store reads it once at startup via `initialState`. During a live session, only a Redux dispatch updates the store.
+
+| Scenario | What sets `state.userLogin.userInfo` |
+|---|---|
+| Page refresh after register/login | `localStorage` → `initialState` → store |
+| Same session, no refresh | `dispatch(USER_LOGIN_SUCCESS)` → reducer → store |
+
+Both paths must work, so both are needed.
+
+---
+
+### `logout` action creator
+
+```js
+export const logout = () => (dispatch) => {
+  localStorage.removeItem('userInfo')
+  dispatch({ type: USER_LOGOUT })
+}
+```
+
+Not async — no API call needed. It does two things:
+1. Removes `userInfo` from `localStorage` so the user doesn't reappear on next page load
+2. Dispatches `USER_LOGOUT` — both `userLoginReducers` and `userRegisterReducers` handle this case, returning `{}` to wipe their state clean
+
+---
+
+### Header.jsx — conditional rendering based on login state
+
+The Header now reads `state.userLogin` from the store and conditionally renders either a login link or a user dropdown:
+
+```jsx
+const userLogin = useSelector((state) => state.userLogin)
+const { userInfo } = userLogin
+
+const dispatch = useDispatch()
+
+function logoutHandler() {
+  dispatch(logout())
+}
+
+// In JSX:
+{userInfo ? (
+  <NavDropdown title={userInfo.name} id="username">
+    <LinkContainer to="/profile">
+      <NavDropdown.Item>Profile</NavDropdown.Item>
+    </LinkContainer>
+    <NavDropdown.Item onClick={logoutHandler}>
+      Logout
+    </NavDropdown.Item>
+  </NavDropdown>
+) : (
+  <LinkContainer to="/login">
+    <Nav.Link><i className="fas fa-user"></i>Login</Nav.Link>
+  </LinkContainer>
+)}
+```
+
+**How it works:**
+
+- `userInfo` is `null` when nobody is logged in → renders the Login link
+- `userInfo` is an object when logged in → renders a dropdown with the user's name as the title
+
+The dropdown shows two options: **Profile** (navigates to `/profile`) and **Logout** (calls `logoutHandler` which dispatches `logout()`).
+
+**`LinkContainer` from `react-router-bootstrap`:**
+Wraps React Bootstrap nav components with React Router's `<Link>` behaviour. Without it, Bootstrap's `Nav.Link` uses a plain `<a href>` tag that causes a full page reload. `LinkContainer` makes it a client-side navigation without reload — same as `<Link>` but compatible with Bootstrap components.
+
+**Why the Header reads `state.userLogin` and not `state.userRegister`:**
+`state.userLogin.userInfo` is the single source of truth for whether a user is authenticated. Both the `login` and `register` actions populate it (register does so by also dispatching `USER_LOGIN_SUCCESS`). The Header only needs to watch one slice.
+
+---
+
+### The redirect pattern in RegisterScreen
+
+`RegisterScreen` uses the same redirect pattern as `LoginScreen` — preserving the destination across the register/login flow:
+
+```js
+const [searchParams] = useSearchParams()
+const redirect = searchParams.get('redirect') || '/'
+
+useEffect(() => {
+  if (userInfo) {
+    navigate(redirect)
+  }
+}, [navigate, userInfo, redirect])
+```
+
+The "Already a customer?" link passes the redirect forward:
+```jsx
+<Link to={redirect ? `/login?redirect=${redirect}` : '/login'}>
+  Login
+</Link>
+```
+
+**Full redirect chain:**
+```
+User tries /shipping (checkout) → not logged in
+    ↓
+Redirected to /login?redirect=/shipping
+    ↓
+Clicks "Don't have an account? Register"
+    ↓
+Goes to /register?redirect=/shipping    ← redirect preserved
+    ↓
+Registers successfully → navigate('/shipping')  ← lands where they wanted
+```
+
+---
+
+### Updated Redux state shape at end of Section 7
+
+```
+store = {
+    productList:    { loading, error, products }
+    productDetails: { loading, error, product }
+    cart:           { cartItems }
+    userLogin:      { loading, error, userInfo }   ← login + register both write here
+    userRegister:   { loading, error, userInfo }   ← register only
+}
+```
+
+`combineReducers` in `Store.jsx`:
+```js
+const reducer = combineReducers({
+    productList:    productListReducers,
+    productDetails: productDetailsReducers,
+    cart:           cartReducer,
+    userLogin:      userLoginReducers,
+    userRegister:   userRegisterReducers    // ← NEW
+})
+```
+
+Each key in `combineReducers` is the exact string you pass to `useSelector` — `state.userLogin`, `state.userRegister`, etc. The reducer only manages its own slice; other slices are untouched by its actions.
+
+---
+
 *More sections will be added as the course progresses.*
