@@ -7,5 +7,6 @@ urlpatterns = [
     path('register/', views.registerUser.as_view(), name='register'),
     # path('', views.GetRoutes.as_view(), name='get_routes'),
     path('profile/', views.GetUserProfile.as_view(), name='get_user_profile'),
+    path('profile/update/', views.UpdateUserProfile.as_view(), name='update_user_profile'),
     path('', views.GetUsers.as_view(), name='get_users'),
 ]

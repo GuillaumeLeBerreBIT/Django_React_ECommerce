@@ -62,6 +62,27 @@ class registerUser(APIView):
             return Response(message, status.HTTP_400_BAD_REQUEST)
 
 
+class UpdateUserProfile(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request):
+
+        user = request.user
+        
+        data = request.data 
+        user.first_name = data['name']
+        user.username = data['email']
+        user.email = data['email']
+        
+        if data['password'] != '':
+            user.password = make_password(data['password'])
+        
+        user.save()
+        
+        serializer = UserSerializerWithToken(user, many=False)
+        
+        return Response(serializer.data)
+    
 class GetUserProfile(APIView):
     permission_classes = [IsAuthenticated]
 

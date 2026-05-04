@@ -2972,4 +2972,320 @@ Each key in `combineReducers` is the exact string you pass to `useSelector` — 
 
 ---
 
+### User Profile — fetching and displaying profile data
+
+This adds a profile page where a logged-in user can see their details and update them. It touches every layer: a new backend endpoint, new Redux constants/reducer/action, a new frontend page, and new routes.
+
+---
+
+#### Backend — two new views and a new URL
+
+**`GetUserProfile`** — reads the logged-in user's data:
+
+```python
+class GetUserProfile(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user                      # set automatically by JWTAuthentication
+        serializer = UserSerializer(user, many=False)
+        return Response(serializer.data)
+```
+
+`request.user` is populated automatically by the `JWTAuthentication` middleware defined in `settings.py`. It reads the `Authorization: Bearer <token>` header on the request, decodes the JWT, looks up the matching user in the database, and attaches them to the request — all before your view code runs. You never have to write that lookup yourself.
+
+**`UpdateUserProfile`** — updates the logged-in user's data:
+
+```python
+class UpdateUserProfile(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request):
+        user = request.user
+        data = request.data
+
+        user.first_name = data['name']
+        user.username   = data['email']
+        user.email      = data['email']
+
+        if data['password'] != '':
+            user.password = make_password(data['password'])
+
+        user.save()
+
+        serializer = UserSerializerWithToken(user, many=False)
+        return Response(serializer.data)
+```
+
+Key points:
+- The serializer is created **after** `user.save()` — so it captures the updated state, not the old one
+- `make_password()` hashes the new password before storing it — never store plain text passwords
+- Password is only updated if the field is not empty — allows updating name/email without changing password
+- Returns `UserSerializerWithToken` (not plain `UserSerializer`) so the frontend receives a fresh token to store in `localStorage`
+
+**Why two separate views instead of one:**
+`GET` uses `UserSerializer` (no token needed — just profile data). `PUT` uses `UserSerializerWithToken` (needs to return a token so the frontend can stay logged in after an update). Two different serializers = cleaner as two separate views.
+
+**New URLs in `user_urls.py`:**
+
+```python
+path('profile/',        views.GetUserProfile.as_view(),    name='get_user_profile'),
+path('profile/update/', views.UpdateUserProfile.as_view(), name='update_user_profile'),
+```
+
+Full assembled URLs:
+
+```
+GET  /api/users/profile/         → GetUserProfile   (read profile)
+PUT  /api/users/profile/update/  → UpdateUserProfile (update profile)
+```
+
+---
+
+#### How authentication works on these endpoints
+
+Two separate mechanisms work together — they are NOT the same thing:
+
+**Authentication** (`DEFAULT_AUTHENTICATION_CLASSES` in `settings.py`) — runs on **every** request, including public ones like login. It reads the token from the header, decodes it, and sets `request.user`. It never blocks a request — if no token is present it just sets `request.user = AnonymousUser` and moves on.
+
+**Authorization** (`permission_classes` on the view) — runs after authentication and decides whether the identified user is allowed in:
+
+```
+Request hits /api/users/profile/
+    ↓
+JWTAuthentication runs (always)
+    → token present + valid → request.user = User instance
+    → token missing/invalid → request.user = AnonymousUser
+    ↓
+permission_classes = [IsAuthenticated] checks request.user
+    → User instance    → allowed through → view runs
+    → AnonymousUser    → 403 returned   → view never runs
+```
+
+The login endpoint has no `permission_classes` — it defaults to `AllowAny`, meaning anyone can hit it (which is correct — you need to be able to log in without a token).
+
+---
+
+#### Frontend — three new constants
+
+```js
+export const USER_DETAILS_REQUEST = 'USER_DETAILS_REQUEST'
+export const USER_DETAILS_SUCCESS = 'USER_DETAILS_SUCCESS'
+export const USER_DETAILS_FAIL    = 'USER_DETAILS_FAIL'
+```
+
+Same pattern as every other feature — shared string constants imported by both the action creator and the reducer.
+
+---
+
+#### Frontend — `userDetailsReducers`
+
+```js
+export const userDetailsReducers = (state = { user: {} }, action) => {
+  switch (action.type) {
+    case USER_DETAILS_REQUEST:
+      return { ...state, loading: true }
+    case USER_DETAILS_SUCCESS:
+      return { loading: false, user: action.payload }
+    case USER_DETAILS_FAIL:
+      return { loading: false, error: action.error }
+    default:
+      return state
+  }
+}
+```
+
+Initial state is `{ user: {} }` — an empty object rather than `null`. This prevents the `ProfileScreen` from crashing when it tries to read `user.name` before the fetch completes, since accessing a property on `{}` returns `undefined` rather than throwing an error.
+
+Notice `USER_DETAILS_REQUEST` uses `{ ...state, loading: true }` — it spreads the existing state and only adds `loading: true`. This keeps any previously fetched `user` data visible while a re-fetch is in progress, instead of blanking it out. Compare to `USER_DETAILS_SUCCESS` which returns a fresh object (old data is replaced by new data).
+
+Registered in `Store.jsx`:
+```js
+const reducer = combineReducers({
+    // ...existing slices
+    userDetails: userDetailsReducers    // → state.userDetails
+})
+```
+
+---
+
+#### Frontend — `getUserDetails` action creator
+
+```js
+export const getUserDetails = (id) => async (dispatch, getState) => {
+  try {
+    dispatch({ type: USER_DETAILS_REQUEST })
+
+    const { userLogin: { userInfo } } = getState()   // ← reads token from store
+
+    const config = {
+      headers: {
+        'Content-type': 'application/json',
+        'Authorization': `Bearer ${userInfo.token}`  // ← sends token to Django
+      }
+    }
+
+    const { data } = await axios.get(`/api/users/${id}/`, config)
+
+    dispatch({ type: USER_DETAILS_SUCCESS, payload: data })
+
+  } catch (error) {
+    dispatch({
+      type: USER_DETAILS_FAIL,
+      error: error.response && error.response.data.detail
+        ? error.response.data.detail
+        : error.message,
+    })
+  }
+}
+```
+
+**`getState()` — reading from the store inside an action creator:**
+`getState` is the second argument thunk injects (after `dispatch`). It returns the current Redux store state. Here it's used to pull the JWT token out of `state.userLogin.userInfo.token` — so the action can attach it to the request header.
+
+The destructuring `const { userLogin: { userInfo } } = getState()` is shorthand for:
+```js
+const state = getState()
+const userInfo = state.userLogin.userInfo
+```
+
+**Why `Authorization: Bearer ${userInfo.token}`:**
+Django's `GetUserProfile` has `permission_classes = [IsAuthenticated]`. Without this header, `JWTAuthentication` finds no token, sets `request.user = AnonymousUser`, and the permission check returns 403. With the header, it decodes the token and grants access.
+
+**Why `id` is passed as `"profile"`:**
+```js
+dispatch(getUserDetails("profile"))
+```
+The URL becomes `/api/users/profile/` — which matches the `GetUserProfile` endpoint. This is a deliberate reuse: the same action creator can later fetch any user by id (e.g. `getUserDetails(5)` → `/api/users/5/`) for admin functionality.
+
+---
+
+#### Frontend — `ProfileScreen.jsx`
+
+```jsx
+export default function ProfileScreen() {
+  const [name, setName]                     = useState('')
+  const [email, setEmail]                   = useState('')
+  const [password, setPassword]             = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [message, setMessage]               = useState('')
+
+  const userDetails = useSelector((state) => state.userDetails)
+  const { loading, user, error } = userDetails
+
+  const userLogin = useSelector((state) => state.userLogin)
+  const { userInfo } = userLogin
+
+  useEffect(() => {
+    if (!userInfo) {
+      navigate('/login')          // not logged in → redirect to login
+    } else {
+      if (!user || !user.name) {
+        dispatch(getUserDetails('profile'))   // fetch profile from Django
+      } else {
+        setName(user.name)        // profile loaded → pre-fill the form fields
+        setEmail(user.email)
+      }
+    }
+  }, [dispatch, navigate, userInfo, user])
+```
+
+**Two `useSelector` calls — why both are needed:**
+
+| Selector | Slice | Used for |
+|---|---|---|
+| `state.userLogin` | `userLoginReducers` | Check if logged in; get the token |
+| `state.userDetails` | `userDetailsReducers` | The full profile data from the API |
+
+`userInfo` (from `userLogin`) is the lightweight object stored after login — it has the token but may not have all profile fields. `user` (from `userDetails`) is the full profile fetched from `/api/users/profile/`.
+
+**The `useEffect` logic step by step:**
+
+```
+Component mounts
+    ↓
+Is userInfo null?
+    Yes → navigate('/login')   ← guard: redirect unauthenticated users
+    No  ↓
+Does user.name exist yet?
+    No  → dispatch(getUserDetails('profile'))   ← fetch from Django
+    Yes → setName(user.name), setEmail(user.email)  ← pre-fill form
+```
+
+The second condition `!user || !user.name` prevents re-fetching on every render. Once the profile is loaded into the store, the effect just pre-fills the form instead of making another API call.
+
+**The form layout:**
+```
+Row
+├── Col md=3   ← profile form (name, email, password, confirm password)
+└── Col md=9   ← "My Orders" placeholder (orders feature added later)
+```
+
+**Password confirm check in `submitHandler`:**
+```js
+if (password !== confirmPassword) {
+    setMessage('Passwords do not match!')
+} else {
+    // dispatch update action (added in next step)
+}
+```
+`message` is local component state (not Redux) — it only lives in this component and doesn't need to be shared anywhere else. `setMessage` triggers a re-render that shows the `<Message>` component at the top of the form.
+
+---
+
+#### App.js — new route added
+
+```js
+<Route path='/profile' element={<ProfileScreen />} />
+```
+
+`ProfileScreen` handles its own auth guard internally (the `useEffect` redirect). No special protected route wrapper is needed — if `userInfo` is null, the effect fires immediately and navigates to `/login`.
+
+---
+
+#### Full data flow — loading the profile page
+
+```
+User navigates to /profile
+    ↓
+ProfileScreen mounts
+    ↓
+useEffect runs
+    → userInfo exists? (from state.userLogin)
+    → user.name exists? No → dispatch(getUserDetails('profile'))
+    ↓
+getUserDetails action:
+    → dispatch USER_DETAILS_REQUEST → state.userDetails = { loading: true }
+    → getState() grabs token from state.userLogin.userInfo.token
+    → GET /api/users/profile/ with Authorization: Bearer <token>
+    ↓
+Django JWTAuthentication decodes token → request.user = User instance
+permission_classes = [IsAuthenticated] → passes
+GetUserProfile.get() → UserSerializer(user) → Response(data)
+    ↓
+    → dispatch USER_DETAILS_SUCCESS → state.userDetails = { user: { name, email, ... } }
+    ↓
+useEffect fires again (user changed in store)
+    → user.name now exists → setName(user.name), setEmail(user.email)
+    ↓
+Form fields pre-filled with profile data
+```
+
+---
+
+#### Updated Redux state shape at end of Section 7
+
+```
+store = {
+    productList:    { loading, error, products }
+    productDetails: { loading, error, product }
+    cart:           { cartItems }
+    userLogin:      { loading, error, userInfo }
+    userRegister:   { loading, error, userInfo }
+    userDetails:    { loading, error, user }        ← NEW
+}
+```
+
+---
+
 *More sections will be added as the course progresses.*
