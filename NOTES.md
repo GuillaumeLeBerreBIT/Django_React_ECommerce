@@ -3288,4 +3288,271 @@ store = {
 
 ---
 
+### Update User Profile — the final piece of Section 7
+
+This adds the ability for a logged-in user to update their name, email, and password from the profile page.
+
+---
+
+#### New constants
+
+Four new strings added to `userConstants.js`:
+
+```js
+export const USER_UPDATE_PROFILE_REQUEST = 'USER_UPDATE_PROFILE_REQUEST'
+export const USER_UPDATE_PROFILE_SUCCESS = 'USER_UPDATE_PROFILE_SUCCESS'
+export const USER_UPDATE_PROFILE_FAIL    = 'USER_UPDATE_PROFILE_FAIL'
+export const USER_UPDATE_PROFILE_RESET   = 'USER_UPDATE_PROFILE_RESET'
+```
+
+Also one new constant for `userDetails`:
+```js
+export const USER_DETAILS_RESET = 'USER_DETAILS_RESET'
+```
+
+The `RESET` constants are new — explained below.
+
+---
+
+#### `userUpdateProfileReducers` — a new slice with a `success` flag
+
+```js
+export const userUpdateProfileReducers = (state = {}, action) => {
+  switch (action.type) {
+    case USER_UPDATE_PROFILE_REQUEST:
+      return { ...state, loading: true }
+    case USER_UPDATE_PROFILE_SUCCESS:
+      return { loading: false, success: true, userInfo: action.payload }
+    case USER_UPDATE_PROFILE_FAIL:
+      return { loading: false, error: action.error }
+    case USER_UPDATE_PROFILE_RESET:
+      return {}
+    default:
+      return state
+  }
+}
+```
+
+**The `success: true` flag** is the key new idea. It's a boolean the component can watch with `useSelector`. When `success` becomes `true`, the `ProfileScreen` knows the update finished and can trigger a re-fetch of the profile. Without it, there'd be no way for the component to know the update completed.
+
+**`USER_UPDATE_PROFILE_RESET`** wipes the slice back to `{}`. This is needed to clear `success` after it's been acted on — otherwise it stays `true` permanently and causes an infinite re-fetch loop.
+
+Also added to `userDetailsReducers`:
+```js
+case USER_DETAILS_RESET:
+  return { user: {} }
+```
+
+---
+
+#### The RESET pattern — why it exists
+
+RESET constants solve two stale-state problems:
+
+**Problem 1 — After logout:**
+`state.userDetails` still holds the previous user's profile after logout. If a different user logs in on the same session, they'd briefly see the old profile. The `logout` action now clears it:
+
+```js
+export const logout = () => (dispatch) => {
+  localStorage.removeItem('userInfo')
+  dispatch({ type: USER_LOGOUT })
+  dispatch({ type: USER_DETAILS_RESET })   // ← wipes state.userDetails = { user: {} }
+}
+```
+
+**Problem 2 — After a successful update:**
+`success` stays `true` forever after an update. Since `success` is in the `useEffect` dependency array, it would trigger re-fetching on every render — an infinite loop. The fix is to reset it immediately after reacting to it:
+
+```js
+useEffect(() => {
+  if (!user || !user.name || success) {
+    dispatch({ type: USER_UPDATE_PROFILE_RESET })  // ← clears success immediately
+    dispatch(getUserDetails('profile'))             // ← then re-fetches
+  }
+}, [user, success, ...])
+```
+
+The order matters: reset first, then fetch. If you fetched first, `success` would still be `true` when the effect ran again, causing another loop.
+
+---
+
+#### `updateUserProfile` action creator
+
+```js
+export const updateUserProfile = (user) => async (dispatch, getState) => {
+  try {
+    dispatch({ type: USER_UPDATE_PROFILE_REQUEST })
+
+    const { userLogin: { userInfo } } = getState()   // ← get token from store
+
+    const config = {
+      headers: {
+        'Content-type': 'application/json',
+        'Authorization': `Bearer ${userInfo.token}`
+      }
+    }
+
+    const { data } = await axios.put('/api/users/profile/update/', user, config)
+
+    dispatch({ type: USER_UPDATE_PROFILE_SUCCESS, payload: data })
+
+    dispatch({ type: USER_LOGIN_SUCCESS, payload: data })   // ← update Header too
+
+    localStorage.setItem('userInfo', JSON.stringify(data))
+
+  } catch (error) {
+    dispatch({
+      type: USER_UPDATE_PROFILE_FAIL,
+      error: error.response && error.response.data.detail
+        ? error.response.data.detail
+        : error.message,
+    })
+  }
+}
+```
+
+**`axios.put(url, data, config)`** — positional arguments, not named. Order is always: URL first, body data second, config (headers) third. JavaScript doesn't support named function arguments like Python does.
+
+**Why `USER_LOGIN_SUCCESS` is dispatched again:**
+Same reason as in `register` — `state.userLogin` is what the Header reads to show the user's name. If the user updates their name on the profile page, the Header dropdown must reflect the new name immediately. The only way to update `state.userLogin.userInfo` is to dispatch `USER_LOGIN_SUCCESS` with the new data. This is the same cross-slice trick used in the register flow.
+
+**Why `localStorage` is updated:**
+On page refresh, the store re-hydrates from `localStorage`. If the profile was updated but `localStorage` still has the old name/token, the store would start with stale data. Saving to `localStorage` here keeps it in sync.
+
+---
+
+#### `ProfileScreen` — the complete component
+
+```js
+const userDetails       = useSelector((state) => state.userDetails)
+const { loading, user, error } = userDetails
+
+const userLogin         = useSelector((state) => state.userLogin)
+const { userInfo }      = userLogin
+
+const userUpdateProfile = useSelector((state) => state.userUpdateProfile)
+const { success }       = userUpdateProfile
+```
+
+Three `useSelector` calls — each reading a different slice for a different purpose:
+
+| Slice | What it provides |
+|---|---|
+| `state.userLogin` | `userInfo` — checks if logged in, has the token |
+| `state.userDetails` | `user` — full profile data from the API, pre-fills the form |
+| `state.userUpdateProfile` | `success` — signals when an update has completed |
+
+**The `useEffect` — full logic:**
+
+```js
+useEffect(() => {
+  if (!userInfo) {
+    navigate('/login')           // not logged in → redirect away
+  } else {
+    if (!user || !user.name || success) {
+      dispatch({ type: USER_UPDATE_PROFILE_RESET })  // clear success flag
+      dispatch(getUserDetails('profile'))             // fetch fresh profile
+    } else {
+      setName(user.name)         // profile loaded → pre-fill form
+      setEmail(user.email)
+    }
+  }
+}, [dispatch, navigate, userInfo, user, success])
+```
+
+The three conditions that trigger a fetch:
+- `!user` — no profile data at all yet (first load)
+- `!user.name` — profile object exists but is empty
+- `success` — an update just completed, need fresh data
+
+**The `submitHandler`:**
+
+```js
+function submitHandler(e) {
+  e.preventDefault()
+
+  if (password !== confirmPassword) {
+    setMessage('Passwords do not match!')
+  } else {
+    dispatch(updateUserProfile({
+      id:       user._id,
+      name:     name,
+      email:    email,
+      password: password
+    }))
+    setMessage('')
+  }
+}
+```
+
+`e.preventDefault()` stops the browser's default form submit behaviour (which would reload the page). The password match check uses local component state (`message`) — this error only matters inside this component and doesn't need to be in Redux.
+
+---
+
+#### The complete update flow — end to end
+
+```
+User edits name/email/password → clicks Update
+    ↓
+submitHandler → passwords match? → dispatch(updateUserProfile({ id, name, email, password }))
+    ↓
+updateUserProfile action:
+  → dispatch USER_UPDATE_PROFILE_REQUEST
+    → state.userUpdateProfile = { loading: true }
+    → getState() pulls token from state.userLogin.userInfo.token
+    → PUT /api/users/profile/update/  with Authorization: Bearer <token>
+    ↓
+Django UpdateUserProfile view:
+  → JWTAuthentication decodes token → request.user = User instance
+  → IsAuthenticated passes
+  → user.first_name = data['name'], user.email = data['email']
+  → make_password(data['password']) if password not empty
+  → user.save()
+  → UserSerializerWithToken(user) → Response({ name, email, token, ... })
+    ↓
+  → dispatch USER_UPDATE_PROFILE_SUCCESS  → state.userUpdateProfile = { success: true, userInfo: data }
+  → dispatch USER_LOGIN_SUCCESS           → state.userLogin = { userInfo: data }  ← Header updates
+  → localStorage.setItem('userInfo', ...) ← persists across refresh
+    ↓
+useEffect fires (success changed to true)
+  → dispatch USER_UPDATE_PROFILE_RESET    → state.userUpdateProfile = {}
+  → dispatch getUserDetails('profile')    → re-fetches fresh profile from Django
+    ↓
+Profile re-fetched → USER_DETAILS_SUCCESS → state.userDetails = { user: { new data } }
+    ↓
+useEffect fires again (user changed)
+  → user.name exists, success is false → setName/setEmail called
+  → form pre-fills with updated data
+```
+
+---
+
+#### Complete Redux state shape — end of Section 7
+
+```
+store = {
+    productList:         { loading, error, products }
+    productDetails:      { loading, error, product }
+    cart:                { cartItems }
+    userLogin:           { loading, error, userInfo }        ← login + register + update all write here
+    userRegister:        { loading, error, userInfo }
+    userDetails:         { loading, error, user }            ← full profile, reset on logout
+    userUpdateProfile:   { loading, error, success, userInfo } ← NEW, reset after success
+}
+```
+
+**The cross-slice dispatch pattern used in this app:**
+
+Three different action creators dispatch `USER_LOGIN_SUCCESS` to update `state.userLogin`:
+
+| Action creator | Why it also dispatches USER_LOGIN_SUCCESS |
+|---|---|
+| `login` | It IS the login — primary use |
+| `register` | Auto-logs in after registration |
+| `updateUserProfile` | Updates Header name after profile change |
+
+This works because Redux broadcasts every action to all reducers. `userLoginReducers` reacts to `USER_LOGIN_SUCCESS` regardless of which action creator fired it.
+
+---
+
 *More sections will be added as the course progresses.*

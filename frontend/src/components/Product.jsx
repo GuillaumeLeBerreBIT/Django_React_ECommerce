@@ -21,7 +21,7 @@ export default function Product({ product }) {
           </div>
         </Card.Text>
 
-        <Card.Text>
+        <Card.Text as="div">
           <h3>${product.price}</h3>
         </Card.Text>
       </Card.Body>
