@@ -13,6 +13,7 @@
 - [Section 5 — Adding to Shopping Cart](#section-5--adding-to-shopping-cart)
 - [Section 6 — Backend User Authentication](#section-6--backend-user-authentication)
 - [Section 7 — User Login Reducer & Action](#section-7--user-login-reducer--action)
+- [Section 8 — Checkout Flow (Cart → Login → Shipping)](#section-8--checkout-flow-cart--login--shipping)
 
 ---
 
@@ -3552,6 +3553,163 @@ Three different action creators dispatch `USER_LOGIN_SUCCESS` to update `state.u
 | `updateUserProfile` | Updates Header name after profile change |
 
 This works because Redux broadcasts every action to all reducers. `userLoginReducers` reacts to `USER_LOGIN_SUCCESS` regardless of which action creator fired it.
+
+---
+
+---
+
+## Section 8 — Checkout Flow (Cart → Login → Shipping)
+
+### What was built
+
+The checkout flow: a user clicks "Proceed to Checkout" in the cart, gets redirected to login if not authenticated (with a redirect back after), and lands on a shipping form that saves the address to Redux and localStorage.
+
+**Files created:**
+- `frontend/src/pages/ShippingScreen.jsx` — shipping address form
+
+**Files modified:**
+- `frontend/src/pages/CartScreen.jsx` — `checkoutHandler` now checks auth before redirecting
+- `frontend/src/pages/LoginScreen.jsx` — fixed wrong query param name (`search` → `redirect`)
+- `frontend/src/App.js` — added `/shipping` route
+- `frontend/src/actions/cartActions.js` — added `saveShippingAddresss` action
+- `frontend/src/reducers/cartReducers.js` — added `CART_SAVE_SHIPPING_ADDRESS` case
+
+---
+
+### The checkout flow end-to-end
+
+```
+User clicks "Proceed to Checkout"
+        ↓
+checkoutHandler() in CartScreen
+        ↓
+Is userInfo in Redux? ──Yes──► navigate('/shipping')
+        │
+       No
+        ↓
+navigate('/login?redirect=shipping')
+        ↓
+LoginScreen reads ?redirect=shipping
+        ↓
+User logs in → useEffect sees userInfo → navigate('/shipping')
+        ↓
+ShippingScreen — form fills from cart.shippingAddress (pre-filled if returning)
+        ↓
+Submit → saveShippingAddresss() dispatched → navigate('/payment')
+```
+
+---
+
+### CartScreen.jsx — checkoutHandler
+
+```jsx
+const userLogin = useSelector((state) => state.userLogin);
+const { userInfo } = userLogin;
+
+function checkoutHandler() {
+  if (userInfo) {
+    navigate('/shipping')         // already logged in → go straight there
+  } else {
+    navigate('/login?redirect=shipping')  // not logged in → login first
+  }
+}
+```
+
+**Why read `userInfo` from Redux and not from localStorage directly:**
+Redux is the single source of truth for auth state at runtime. `userInfo` is populated from localStorage when the store is initialized (in `store.js`), so it's always in sync.
+
+---
+
+### LoginScreen.jsx — redirect after login
+
+```jsx
+const redirect = searchParams.get("redirect") || "/";
+
+useEffect(() => {
+  if (userInfo) {
+    navigate(redirect);   // goes to 'shipping' if ?redirect=shipping was in the URL
+  }
+}, [navigate, userInfo, redirect]);
+```
+
+**Bug that was fixed:** the original code had `searchParams.get("search")` instead of `searchParams.get("redirect")`. The param name must match exactly what the sender puts in the URL — `?redirect=shipping` requires `.get("redirect")`.
+
+---
+
+### saveShippingAddresss action + reducer
+
+**Action** (`cartActions.js`):
+```js
+export const saveShippingAddresss = (data) => (dispatch) => {
+  dispatch({ type: CART_SAVE_SHIPPING_ADDRESS, payload: data })
+  localStorage.setItem('shippingAddress', JSON.stringify(data))
+}
+```
+
+**Reducer** (`cartReducers.js`):
+```js
+case CART_SAVE_SHIPPING_ADDRESS:
+  return {
+    ...state,
+    shippingAddress: action.payload
+  }
+```
+
+Same pattern as `addToCart`: dispatch → reducer updates state → persist to localStorage so the address survives a page refresh.
+
+---
+
+### ShippingScreen.jsx — the form
+
+```jsx
+const cart = useSelector((state) => state.cart)
+const { shippingAddress } = cart
+
+const [address, setAddress]       = useState(shippingAddress.address)
+const [city, setCity]             = useState(shippingAddress.city)
+const [postalCode, setPostalCode] = useState(shippingAddress.postalCode)
+const [country, setCountry]       = useState(shippingAddress.country)
+
+function submitHandler(e) {
+  e.preventDefault()
+  dispatch(saveShippingAddresss({ address, city, postalCode, country }))
+  navigate('/payment')
+}
+```
+
+**Why initialize state from `shippingAddress`:**
+If the user already went through shipping before (e.g. came back to edit the cart), the address is already in Redux/localStorage. Pre-filling the form from that state means they don't have to retype it.
+
+**`value={address ? address : ""}`:**
+On first visit `shippingAddress` is an empty object `{}`, so `address` is `undefined`. React controlled inputs require a defined value — `undefined` makes React treat it as uncontrolled. The fallback `""` keeps it controlled from the start.
+
+---
+
+### React Router v5 → v6: `useHistory` → `useNavigate`
+
+| v5 | v6 |
+|---|---|
+| `const history = useHistory()` | `const navigate = useNavigate()` |
+| `history.push('/path')` | `navigate('/path')` |
+| `history.goBack()` | `navigate(-1)` |
+
+`useHistory` no longer exists in v6 — always use `useNavigate`.
+
+---
+
+### Updated Redux state shape — end of Section 8
+
+```
+store = {
+    productList:         { loading, error, products }
+    productDetails:      { loading, error, product }
+    cart:                { cartItems, shippingAddress }   ← shippingAddress added
+    userLogin:           { loading, error, userInfo }
+    userRegister:        { loading, error, userInfo }
+    userDetails:         { loading, error, user }
+    userUpdateProfile:   { loading, error, success, userInfo }
+}
+```
 
 ---
 

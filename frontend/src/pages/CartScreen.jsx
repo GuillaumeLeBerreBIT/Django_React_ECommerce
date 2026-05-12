@@ -33,6 +33,9 @@ export default function CartScreen() {
   const { cartItems } = cart;
   console.log(cartItems);
 
+  const userLogin = useSelector((state) => state.userLogin);
+  const { userInfo } = userLogin;
+
   useEffect(() => {
     if (id) {
       dispatch(addToCart(id, qty));
@@ -44,7 +47,11 @@ export default function CartScreen() {
   }
 
   function checkoutHandler () {
-    navigate('/login?redirect=shipping')
+    if (userInfo) {
+      navigate('/shipping')
+    } else {
+      navigate('/login?redirect=shipping')
+    }
   }
 
   return (

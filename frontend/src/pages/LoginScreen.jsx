@@ -15,7 +15,7 @@ export default function LoginScreen() {
 
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const redirect = searchParams.get("search") || "/";
+  const redirect = searchParams.get("redirect") || "/";
 
   const userLogin = useSelector((state) => state.userLogin);
   const { loading, userInfo, error } = userLogin;
