@@ -1,8 +1,7 @@
 import react, { useState, useEffect } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { Form, Button } from "react-bootstrap";
 import { useDispatch, useSelector } from "react-redux";
-import { register } from "../actions/userActions";
 import FormContainer from "../components/FormContainer";
 import CheckOutSteps from "../components/CheckOutSteps";
 import { saveShippingAddresss } from "../actions/cartActions";

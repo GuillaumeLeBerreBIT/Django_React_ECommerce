@@ -13,7 +13,7 @@
 - [Section 5 — Adding to Shopping Cart](#section-5--adding-to-shopping-cart)
 - [Section 6 — Backend User Authentication](#section-6--backend-user-authentication)
 - [Section 7 — User Login Reducer & Action](#section-7--user-login-reducer--action)
-- [Section 8 — Checkout Flow (Cart → Login → Shipping)](#section-8--checkout-flow-cart--login--shipping)
+- [Section 8 — Checkout Flow (Cart → Login → Shipping → Payment → Place Order)](#section-8--checkout-flow-cart--login--shipping)
 
 ---
 
@@ -3710,6 +3710,307 @@ store = {
     userUpdateProfile:   { loading, error, success, userInfo }
 }
 ```
+
+---
+
+---
+
+### Section 8 continued — Payment Method, Checkout Steps, Place Order & Create Order (videos 48–52)
+
+This continues from where the existing Section 8 left off (shipping screen). The notes below cover the payment method screen, checkout steps component, place order screen, and the full order backend + Redux layer.
+
+**New files:**
+- `frontend/src/pages/PlaceOrderScreen.jsx` — order summary + "Place Order" button
+- `frontend/src/constants/orderConstants.js` — `ORDER_CREATE_*` constants
+- `frontend/src/reducers/orderReducers.js` — `orderCreateReducer`
+- `frontend/src/actions/orderActions.js` — `createOrder` async action creator
+
+**Files updated:**
+- `backend/api/serializers.py` — added `OrderSerializer`, `OrderItemSerializer`, `ShippingAddressSerializer`
+- `backend/api/urls/order_urls.py` — wired `POST /api/orders/add/`
+- `backend/api/views/order_views.py` — `OrderItemsAPI` creates the full order
+- `frontend/src/Store.jsx` — registered `orderCreateReducer`
+
+---
+
+#### Payment Method — Redux slice (video 49)
+
+Follows the same constants → reducer → action → localStorage pattern as `saveShippingAddresss` (see existing Section 8). Schema only:
+
+```
+CART_SAVE_PAYMENT_METHOD constant
+cartReducer: CART_SAVE_PAYMENT_METHOD case → { ...state, paymentMethod: action.payload }
+savePaymentMethod action → dispatch → localStorage.setItem('paymentMethod', ...)
+Store.jsx: paymentMethodFromStorage hydrates cart.paymentMethod on init
+```
+
+`PaymentScreen.jsx` reads `cart.shippingAddress` as a guard (if no address → redirect to `/shipping`), collects the payment choice via a radio button, then dispatches `savePaymentMethod` and navigates to `/placeorder`.
+
+---
+
+#### Checkout Steps Component (video 48)
+
+`CheckOutSteps.jsx` is a purely presentational component that receives boolean props (`step1`, `step2`, `step3`, `step4`) and renders a progress bar showing which checkout step the user is on. No Redux — no state, no dispatch. Just props controlling which steps are highlighted.
+
+```jsx
+<CheckOutSteps step1 step2 step3 step4 />   // all four active on PlaceOrderScreen
+<CheckOutSteps step1 step2 step3 />          // three active on PaymentScreen
+```
+
+Every checkout screen renders `<CheckOutSteps>` at the top with the appropriate props.
+
+---
+
+#### Backend — Nested OrderSerializer (video 51)
+
+The `OrderSerializer` needs to embed related objects (items, shipping address, user) that live in separate tables. This uses `SerializerMethodField` — the same pattern documented in [Section 6 — UserSerializer](#serializerspy----userserializer-and-userserializerwithtoken). Schema and new concept only:
+
+```python
+class OrderSerializer(serializers.ModelSerializer):
+    orderItems      = serializers.SerializerMethodField(read_only=True)
+    shippingAddress = serializers.SerializerMethodField(read_only=True)
+    user            = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model  = Order
+        fields = '__all__'
+
+    def get_orderItems(self, obj):
+        items = obj.orderitem_set.all()         # ← reverse FK lookup (new concept below)
+        serializer = OrderItemSerializer(items, many=True)
+        return serializer.data
+
+    def get_shippingAddress(self, obj):
+        try:
+            address = ShippingAddressSerializer(obj.shippingAddress, many=False)
+        except Exception:
+            address = False
+        return address
+
+    def get_user(self, obj):
+        serializer = UserSerializer(obj.user, many=False)
+        return serializer.data
+```
+
+**New concept — `obj.orderitem_set.all()` (reverse FK lookup):**
+
+Because `OrderItem` has `order = ForeignKey(Order, ...)`, Django automatically creates a reverse manager on `Order`. You can access all items belonging to an order without writing a query:
+
+```
+order.orderitem_set.all()   →  SELECT * FROM orderitem WHERE order_id = <this order's id>
+```
+
+The naming convention: `<lowercase_model_name>_set`. So `OrderItem` → `orderitem_set`, `Review` → `review_set`, etc.
+
+**Nested serializers** — `get_orderItems` uses `OrderItemSerializer` *inside* `OrderSerializer`. This embeds the full list of items in the order JSON response, so the frontend doesn't need a second request to get them.
+
+**URL:**
+```
+backend/urls.py:    path('api/orders/', include('api.urls.order_urls'))
+order_urls.py:      path('add/', views.OrderItemsAPI.as_view(), name='orders-add')
+→ Full URL: POST /api/orders/add/
+```
+
+---
+
+#### Backend — OrderItemsAPI view (video 51–52)
+
+```python
+class OrderItemsAPI(APIView):
+    permission_classes = [IsAuthenticated]   # same pattern as Section 6
+
+    def post(self, request):
+        user = request.user      # set by JWTAuthentication from the token header
+        data = request.data
+
+        order_items = data['orderItems']
+        if order_items and len(order_items) == 0:
+            return Response({'detail': 'No Order Items'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Create in dependency order: Order first, then its children
+        order = Order.objects.create(
+            user=user,
+            paymentMethod=data['paymentMethod'],
+            taxPrice=data['taxPrice'],
+            shippingPrice=data['shippingPrice'],
+            totalPrice=data['totalPrice']
+        )
+        ShippingAddress.objects.create(
+            order=order, address=data['shippingAddress']['address'],
+            city=data['shippingAddress']['city'],
+            postalCode=data['shippingAddress']['postalCode'],
+            country=data['shippingAddress']['country'],
+        )
+        for i in order_items:
+            product = Product.objects.get(_id=i['product'])
+            item = OrderItem.objects.create(
+                order=order, product=product, name=product.name,
+                quantity=i['qty'],           # ← model field is `quantity`, not `qty`
+                price=i['price'],
+                image=product.image.url,     # .url gives the servable URL, not just the path
+            )
+            product.countInStock -= item.quantity
+            product.save()
+
+        serializer = OrderSerializer(order, many=False)
+        return Response(serializer.data)
+```
+
+**Key points:**
+- Records must be created in FK dependency order: `Order` first → `ShippingAddress` (needs `order` FK) → `OrderItems` (each needs `order` and `product` FKs).
+- **`product.image.url`** — `ImageField` stores a relative path on disk. `.url` returns the full URL Django will serve it at. Storing the URL on `OrderItem` at order-time preserves the image in order history even if the product image changes later.
+- **`quantity` vs `qty`** — the frontend sends `qty` (how items are named in the cart), but the Django `OrderItem` model field is named `quantity`. Always use the exact model field name when calling `objects.create()`. This is a common source of `TypeError: got unexpected keyword arguments`.
+- Decrements `countInStock` after each item — keeps inventory accurate.
+
+---
+
+#### Frontend — Order Redux (video 52)
+
+Follows the identical constants → reducer → action creator → Store registration pattern documented in [Section 4 (product Redux)](#the-four-files-and-what-each-one-does) and [Section 7 (user Redux)](#userreducersjs----the-login-state-machine). Schema only:
+
+**`orderConstants.js`:**
+```
+ORDER_CREATE_REQUEST | ORDER_CREATE_SUCCESS | ORDER_CREATE_FAIL
+```
+
+**`orderCreateReducer` state shape:**
+
+| Action | State |
+|---|---|
+| `ORDER_CREATE_REQUEST` | `{ loading: true }` |
+| `ORDER_CREATE_SUCCESS` | `{ loading: false, success: true, order: data }` |
+| `ORDER_CREATE_FAIL` | `{ loading: false, error: ... }` |
+| default | `{ ...state }` |
+
+**`createOrder` action creator** — same JWT header pattern as `getUserDetails` (Section 7):
+
+```js
+export const createOrder = (order) => async (dispatch, getState) => {
+  dispatch({ type: ORDER_CREATE_REQUEST })
+
+  const { userLogin: { userInfo } } = getState()   // pull token from store
+
+  const config = {
+    headers: {
+      'Content-type': 'application/json',
+      Authorization: `Bearer ${userInfo.token}`,   // protected endpoint requires token
+    }
+  }
+
+  const { data } = await axios.post(`/api/orders/add/`, order, config)
+  dispatch({ type: ORDER_CREATE_SUCCESS, payload: data })
+  // ... catch → ORDER_CREATE_FAIL
+}
+```
+
+For the full explanation of `getState()` and the JWT header pattern, see [Section 7 — getUserDetails action creator](#frontend----getuserdetails-action-creator).
+
+**`Store.jsx`:**
+```js
+orderCreate: orderCreateReducer   // → state.orderCreate
+```
+
+---
+
+#### Frontend — PlaceOrderScreen.jsx (video 50)
+
+The final checkout step — shows the full order summary and triggers order creation.
+
+**Price calculations (computed in the component, not stored in Redux):**
+```js
+cart.itemPrice     = cart.cartItems.reduce((acc, item) => acc + item.price * item.qty, 0).toFixed(2)
+cart.shippingPrice = (cart.itemPrice > 100 ? 0 : 10).toFixed(2)   // free over $100
+cart.taxPrice      = Number(cart.itemPrice * 0.12).toFixed(2)
+cart.totalPrice    = (Number(cart.itemPrice) + Number(cart.shippingPrice) + Number(cart.taxPrice)).toFixed(2)
+```
+
+These are derived from `cartItems` — no reason to store in Redux since they can always be recalculated.
+
+**Two `useEffect` guards:**
+```js
+// Guard 1 — no payment method → redirect back to payment page
+useEffect(() => {
+  if (!cart.paymentMethod) navigate('/payment')
+}, [cart.paymentMethod, navigate])
+
+// Guard 2 — order successfully created → navigate to order detail
+useEffect(() => {
+  if (success) navigate(`/order/${order._id}`)
+}, [success, navigate, order])
+```
+
+Both guards must be in `useEffect` — see [the rule explained in Section 7](#useeffect----the-hook-that-triggers-async-work-after-render). Calling `navigate()` directly in the render body is a side effect that causes React to behave unpredictably (the navigation may silently not fire).
+
+**`placeOrder` handler:**
+```js
+function placeOrder() {
+  dispatch(createOrder({
+    orderItems: cart.cartItems, shippingAddress: cart.shippingAddress,
+    paymentMethod: cart.paymentMethod, itemsPrice: cart.itemsPrice,
+    shippingPrice: cart.shippingPrice, taxPrice: cart.taxPrice,
+    totalPrice: cart.totalPrice,
+  }))
+}
+```
+
+All data comes from the Redux `cart` slice — no local state. The component reads the store and sends it straight to the backend.
+
+---
+
+#### Complete Place Order data flow
+
+```
+User on /placeorder → clicks "Place Order"
+    ↓
+dispatch(createOrder({ ...cartData }))
+    ↓
+ORDER_CREATE_REQUEST → state.orderCreate = { loading: true }
+    ↓
+POST /api/orders/add/  Authorization: Bearer <token>
+  Body: { orderItems, shippingAddress, paymentMethod, taxPrice, shippingPrice, totalPrice }
+    ↓
+Django OrderItemsAPI:
+  JWTAuthentication decodes token → request.user = User
+  IsAuthenticated passes
+  Order.objects.create(...)
+  ShippingAddress.objects.create(order=order, ...)
+  For each item:
+    OrderItem.objects.create(order, product, quantity=i['qty'], ...)
+    product.countInStock -= item.quantity; product.save()
+  OrderSerializer(order) → nested JSON { order + items[] + shippingAddress + user }
+    ↓
+ORDER_CREATE_SUCCESS → state.orderCreate = { loading: false, success: true, order: data }
+    ↓
+useEffect sees success → navigate(`/order/${order._id}`)
+```
+
+---
+
+#### Updated Redux state shape
+
+```
+store = {
+    productList:         { loading, error, products }
+    productDetails:      { loading, error, product }
+    cart:                { cartItems, shippingAddress, paymentMethod }
+    userLogin:           { loading, error, userInfo }
+    userRegister:        { loading, error, userInfo }
+    userDetails:         { loading, error, user }
+    userUpdateProfile:   { loading, error, success, userInfo }
+    orderCreate:         { loading, error, success, order }   ← NEW
+}
+```
+
+**localStorage persistence — full picture:**
+
+| Key | Saved when | Restored at store init |
+|---|---|---|
+| `cartItems` | Every cart add / remove | `cart.cartItems` |
+| `shippingAddress` | Shipping form submit | `cart.shippingAddress` |
+| `paymentMethod` | Payment form submit | `cart.paymentMethod` |
+| `userInfo` | Login / register / profile update | `userLogin.userInfo` |
+
+Orders are **not** persisted to localStorage — they live in the Django database and are fetched on demand.
 
 ---
 
