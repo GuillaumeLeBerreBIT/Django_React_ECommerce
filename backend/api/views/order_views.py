@@ -59,3 +59,24 @@ class OrderItemsAPI(APIView):
                 
             serializer = OrderSerializer(order, many=False)
             return Response(serializer.data)
+
+
+class OrderIdAPI(APIView):
+    
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request, pk):
+        
+        try:
+            order = Order.objects.get(_id=pk)
+            user = request.user
+            
+            if user.is_staff or order.user == user:
+                serializer = OrderSerializer(order, many=False)
+                return Response(serializer.data)
+            else:
+                Response({'detail': 'Not Authorized to view this order'},
+                         status=status.HTTP_400_BAD_REQUEST)
+            
+        except Exception as e:
+            return Response({'detial': 'Order does not exist.'}, status=status.HTTP_400_BAD_REQUEST)
