@@ -6,6 +6,7 @@ import { useDispatch, useSelector } from "react-redux";
 import Message from "../components/Message";
 import CheckOutSteps from "../components/CheckOutSteps";
 import { createOrder } from "../actions/orderActions";
+import { ORDER_CREATE_RESET } from "../constants/orderConstants";
 
 export default function PlaceOrderScreen() {
 
@@ -37,6 +38,7 @@ export default function PlaceOrderScreen() {
   useEffect(() => {
     if (success) {
       navigate(`/order/${order._id}`)
+      dispatch({type: ORDER_CREATE_RESET})
     }
   }, [success, navigate, order])
 
