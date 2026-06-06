@@ -8,7 +8,7 @@ from ..serializers import ProductSerializer, OrderSerializer
 
 from django.contrib.auth.hashers import make_password
 from rest_framework import status
-
+from datetime import datetime
 
 class OrderItemsAPI(APIView):
 
@@ -80,3 +80,12 @@ class OrderIdAPI(APIView):
             
         except Exception as e:
             return Response({'detial': 'Order does not exist.'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    def put(self, _request, pk):
+        order = Order.objects.get(_id=pk)
+        order.isPaid = True
+        order.paidAt = datetime.now()
+        
+        order.save()
+        
+        return Response('Prder was paid.')

@@ -14,6 +14,7 @@
 - [Section 6 — Backend User Authentication](#section-6--backend-user-authentication)
 - [Section 7 — User Login Reducer & Action](#section-7--user-login-reducer--action)
 - [Section 8 — Checkout Flow (Cart → Login → Shipping → Payment → Place Order)](#section-8--checkout-flow-cart--login--shipping)
+- [Section 9 — Get Order by ID API](#section-9--get-order-by-id-api)
 
 ---
 
@@ -4011,6 +4012,160 @@ store = {
 | `userInfo` | Login / register / profile update | `userLogin.userInfo` |
 
 Orders are **not** persisted to localStorage — they live in the Django database and are fetched on demand.
+
+---
+
+#### Clearing the cart after placing an order
+
+Once the order is successfully created on the backend, the cart should be emptied. This requires one new constant and a new reducer case.
+
+**New constant in `cartConstants.js`:**
+```js
+export const CART_CLEAR_ITEMS = 'CART_CLEAR_ITEMS'
+```
+
+**New case in `cartReducers.js`:**
+```js
+case CART_CLEAR_ITEMS:
+  return {
+    ...state,
+    cartItems: []
+  }
+```
+
+**Dispatched inside `createOrder` after success:**
+```js
+dispatch({ type: ORDER_CREATE_SUCCESS, payload: data })
+
+dispatch({ type: CART_CLEAR_ITEMS })          // wipe cart in Redux store
+
+localStorage.removeItem('cartItems')          // wipe cart from localStorage
+```
+
+**Why both Redux and localStorage must be cleared:**
+Redux holds the live in-memory cart for the current session. localStorage holds the persisted copy that survives page refresh. If you only cleared Redux, the cart would reappear on the next page load. If you only cleared localStorage, the cart would still show in the current session until refresh. Both must be removed.
+
+**Order of operations matters:**
+```
+createOrder POSTs to backend
+    ↓
+Django creates Order, OrderItem, ShippingAddress records → decrements countInStock
+    ↓
+ORDER_CREATE_SUCCESS dispatched (order saved in state.orderCreate)
+    ↓
+CART_CLEAR_ITEMS dispatched (cartItems = [] in state.cart)
+    ↓
+localStorage.removeItem('cartItems') (cart gone on next refresh too)
+    ↓
+useEffect sees success → navigate(`/orders/${order._id}`)
+```
+
+The cart is cleared **after** the backend confirms the order — never before. If the API call failed you'd want the cart intact so the user can retry.
+
+---
+
+---
+
+## Section 9 — Get Order by ID API
+
+### What was built
+
+A backend endpoint to retrieve a single order by its ID, accessible only to the order owner or an admin. No frontend screen was built yet — this section focuses on the Django backend and the URL configuration.
+
+**Files modified:**
+- `backend/api/views/order_views.py` — added `OrderIdAPI` class
+- `backend/api/urls/order_urls.py` — added `<str:pk>/` route
+
+---
+
+### Backend — OrderIdAPI view
+
+```python
+class OrderIdAPI(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        try:
+            order = Order.objects.get(_id=pk)
+            user = request.user
+
+            if user.is_staff or order.user == user:
+                serializer = OrderSerializer(order, many=False)
+                return Response(serializer.data)
+            else:
+                return Response(
+                    {'detail': 'Not Authorized to view this order'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        except Exception as e:
+            return Response(
+                {'detail': 'Order does not exist.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+```
+
+**Two-layer access check:**
+
+`permission_classes = [IsAuthenticated]` is the outer gate — rejects anyone without a valid token before the view body runs. But being authenticated is not enough on its own: you shouldn't be able to view someone else's order just because you're logged in. The inner `if` check handles that:
+
+```
+request.user.is_staff   → admin can see any order
+order.user == user      → the order belongs to the logged-in user
+```
+
+If neither is true, a `400` response is returned. Note: this should arguably be a `403 Forbidden` instead of `400 Bad Request`, but `400` is what the course uses.
+
+**Why `try/except` instead of `get_object_or_404`:**
+If `Order.objects.get(_id=pk)` finds no matching record, it raises a `DoesNotExist` exception. The `except` block catches that (and any other exception) and returns a friendly JSON error instead of a raw Django 500 error page.
+
+**The `OrderSerializer` response includes nested data:**
+Because `OrderSerializer` uses `SerializerMethodField` for `orderItems`, `shippingAddress`, and `user` (see the serializer section in Section 8), the single response embeds everything the frontend order detail page will need — no second requests required.
+
+---
+
+### URL
+
+```python
+# order_urls.py
+urlpatterns = [
+    path('add/', views.OrderItemsAPI.as_view(), name='orders-add'),
+    path('<str:pk>/', views.OrderIdAPI.as_view(), name='user-order'),
+]
+```
+
+Assembled with the project-level prefix:
+```
+GET /api/orders/<pk>/   →   OrderIdAPI   (authenticated owner or admin only)
+```
+
+`<str:pk>` captures the order `_id` from the URL and passes it into the view as the `pk` keyword argument. The `_id` field is Django's `AutoField` primary key — it's an integer, but `<str:pk>` captures it as a string anyway. Django's ORM handles the type coercion when it runs `Order.objects.get(_id=pk)`.
+
+**Complete URL table for the orders feature:**
+
+| Endpoint | Method | Auth | Who | What |
+|---|---|---|---|---|
+| `/api/orders/add/` | POST | Authenticated | Any logged-in user | Create an order |
+| `/api/orders/<pk>/` | GET | Authenticated | Owner or admin | Fetch one order by ID |
+
+---
+
+### Q&A from this session
+
+**Q: How do you configure query params in Django URLs?**
+
+You don't — query params (`?page=2`, `?status=paid`) are never defined in `urls.py`. Django makes them available in every view automatically via `request.GET`:
+
+```python
+def get_orders(request):
+    status = request.GET.get('status')   # reads ?status=paid from the URL
+```
+
+`urls.py` only defines the URL path structure (e.g. `/orders/<pk>/`). Query strings are free-form and parsed at the view level.
+
+**Q: How do you access the DRF browsable API login page?**
+
+The project already has a JWT token endpoint at `POST /api/users/login/`. For protected endpoints, you pass the token in the `Authorization: Bearer <token>` header. There is no browser login form for the browsable API — use a tool like Postman or Thunder Client (VS Code extension) to test protected endpoints.
 
 ---
 
