@@ -97,8 +97,45 @@ class GetUserProfile(APIView):
 class GetUsers(APIView):
     permission_classes = [IsAdminUser]
 
-    def get(self, request):
+    def get(self, _request):
         users = User.objects.all()
         serializer = UserSerializer(users, many=True)
 
+        return Response(serializer.data)
+
+class UserAPI(APIView):
+    
+    permission_classes = [IsAdminUser]
+    
+    def get(self, _request, pk):
+        user = User.objects.get(id=pk)
+        serializer = UserSerializer(user)
+
+        return Response(serializer.data)
+    
+    def delete(self, _request, pk):
+        user_for_deletion = User.objects.get(id=pk)
+        user_for_deletion.delete()
+        
+        return Response('User was deleted')
+    
+class UpdateUser(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request, pk):
+        
+        user = User.objects.get(id=pk)
+        
+        data = request.data 
+        
+        user.first_name = data['name']
+        user.username = data['email']
+        user.email = data['email']
+        user.is_staff = data['isAdmin']
+        
+       
+        user.save()
+        
+        serializer = UserSerializer(user, many=False)
+        
         return Response(serializer.data)

@@ -36,7 +36,7 @@ export default function RegisterScreen() {
         setMessage('Password do not match!')
     } else {
         setMessage('') 
-       dispatch(register(email, password, name));
+       dispatch(register(name, email, password));
     }
     
   }
