@@ -100,3 +100,26 @@ class OrderIdAPI(APIView):
         order.save()
         
         return Response('Prder was paid.')
+    
+class AllOrders(APIView):
+    
+    permission_classes = [IsAdminUser]
+    
+    def get(self, _request):
+        orders = Order.objects.all()
+        
+        serializer = OrderSerializer(orders, many=True)
+        return Response(serializer.data)
+    
+class OrderDelivered(APIView):
+    
+    permission_classes = [IsAdminUser]
+    
+    def put(self, _request, pk):
+        order = Order.objects.get(_id=pk)
+        
+        order.isDelivered = True
+        order.deliveredAt = datetime.now()
+        order.save()
+        
+        return Response('Order was deliverd.')

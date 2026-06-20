@@ -4,23 +4,36 @@ import { Button, Row, Col, ListGroup, Image, Card } from "react-bootstrap";
 import { Link } from "react-router-dom";
 import { useDispatch, useSelector } from "react-redux";
 import Message from "../components/Message";
-import Loader from "../components/Loader"
-import { getOrderDetails, payOrder } from "../actions/orderActions";
-import { PayPalButtons, PayPalScriptProvider } from '@paypal/react-paypal-js'
-import { ORDER_PAY_RESET } from "../constants/orderConstants";
+import Loader from "../components/Loader";
+import {
+  getOrderDetails,
+  payOrder,
+  deliverOrder,
+} from "../actions/orderActions";
+import { PayPalButtons, PayPalScriptProvider } from "@paypal/react-paypal-js";
+import {
+  ORDER_PAY_RESET,
+  ORDER_DELIVERED_RESET,
+} from "../constants/orderConstants";
 
 export default function OrderScreen() {
+  const { id } = useParams();
 
-  const { id } = useParams()
+  const orderDetails = useSelector((state) => state.orderDetails);
+  const { order, error, loading } = orderDetails;
 
-  const orderDetails = useSelector((state) => state.orderDetails)
-  const { order, error, loading} = orderDetails
+  const orderPay = useSelector((state) => state.orderPay);
+  const { loading: loadingPay, success: successPay } = orderPay;
 
-  const orderPay = useSelector((state) => state.orderPay)
-  const { loading: loadingPay, success: successPay} = orderPay
+  const orderDeliver = useSelector((state) => state.orderDeliver);
+  const { loading: loadingDeliver, success: successDeliver } = orderDeliver;
+
+  const userLogin = useSelector((state) => state.userLogin);
+  const { userInfo } = userLogin;
+
 
   const dispatch = useDispatch();
-  const navigate = useNavigate()
+  const navigate = useNavigate();
 
   // sdkReady + addPayPalScript are not needed with @paypal/react-paypal-js
   // (PayPalScriptProvider handles script loading automatically)
@@ -36,28 +49,37 @@ export default function OrderScreen() {
 
   if (!loading && !error && order) {
     order.itemsPrice = order.orderItems
-    .reduce((acc, item) => acc + item.price * item.qty, 0)
-    .toFixed(2);
+      .reduce((acc, item) => acc + item.price * item.qty, 0)
+      .toFixed(2);
   }
 
   useEffect(() => {
-    if (!order || successPay || order._id !== Number(id)) {
-      dispatch({type: ORDER_PAY_RESET})
-      dispatch(getOrderDetails(id))
+
+    if (userInfo) {
+      navigate(`/login`)
+    }
+
+    if (!order || successPay || order._id !== Number(id) || successDeliver) {
+      dispatch({ type: ORDER_PAY_RESET });
+      dispatch({ type: ORDER_DELIVERED_RESET });
+      dispatch(getOrderDetails(id));
     }
     // window.paypal check removed — @paypal/react-paypal-js loads the SDK itself
-  }, [dispatch, order, id, successPay])
+  }, [dispatch, order, id, successPay, successDeliver, userInfo, navigate]);
 
   const successPaymentHandler = (paymentResult) => {
-    dispatch(payOrder(id, paymentResult))
+    dispatch(payOrder(id, paymentResult));
+  };
+
+  function deliverHandler () {
+    dispatch(deliverOrder(order))
   }
 
   return loading ? (
     <Loader />
   ) : error ? (
-    <Message variant='danger'>{error}</Message>
-  ) : 
-  (
+    <Message variant="danger">{error}</Message>
+  ) : (
     <div>
       <h1>Order: {order._id}</h1>
       <Row>
@@ -65,8 +87,14 @@ export default function OrderScreen() {
           <ListGroup variant="flush">
             <ListGroup.Item>
               <h2>Shipping</h2>
-              <p><strong>Name: </strong>{order.user.name}</p>
-              <p><strong>Email: </strong><a href={`mailto:${order.user.email}`}>{order.user.email}</a></p>
+              <p>
+                <strong>Name: </strong>
+                {order.user.name}
+              </p>
+              <p>
+                <strong>Email: </strong>
+                <a href={`mailto:${order.user.email}`}>{order.user.email}</a>
+              </p>
               <p>
                 <strong>Shipping:</strong>
                 {order.shippingAddress.address}, {order.shippingAddress.city}
@@ -75,9 +103,11 @@ export default function OrderScreen() {
                 {order.shippingAddress.country}
               </p>
               {order.deliveredAt ? (
-                <Message variant='success'>Delivered on {order.deliveredAt}</Message>
+                <Message variant="success">
+                  Delivered on {order.deliveredAt}
+                </Message>
               ) : (
-                <Message variant='warning'>Not Delivered</Message>
+                <Message variant="warning">Not Delivered</Message>
               )}
             </ListGroup.Item>
             <ListGroup.Item>
@@ -87,9 +117,9 @@ export default function OrderScreen() {
                 {order.paymentMethod}
               </p>
               {order.isPaid ? (
-                <Message variant='success'>Paid on {order.paidAt}</Message>
+                <Message variant="success">Paid on {order.paidAt}</Message>
               ) : (
-                <Message variant='warning'>Not Paid</Message>
+                <Message variant="warning">Not Paid</Message>
               )}
             </ListGroup.Item>
             <ListGroup.Item>
@@ -163,17 +193,39 @@ export default function OrderScreen() {
                   {loadingPay && <Loader />}
 
                   {/* sdkReady check removed — PayPalScriptProvider handles loading */}
-                  <PayPalScriptProvider options={{ "client-id": process.env.REACT_APP_PAYPAL_CLIENT_ID }}>
+                  <PayPalScriptProvider
+                    options={{
+                      "client-id": process.env.REACT_APP_PAYPAL_CLIENT_ID,
+                    }}
+                  >
                     <PayPalButtons
-                      createOrder={(data, actions) => actions.order.create({
-                        purchase_units: [{ amount: { value: order.totalPrice } }]
-                      })}
-                      onApprove={(data, actions) => actions.order.capture().then(successPaymentHandler)}
+                      createOrder={(data, actions) =>
+                        actions.order.create({
+                          purchase_units: [
+                            { amount: { value: order.totalPrice } },
+                          ],
+                        })
+                      }
+                      onApprove={(data, actions) =>
+                        actions.order.capture().then(successPaymentHandler)
+                      }
                     />
                   </PayPalScriptProvider>
                 </ListGroup.Item>
               )}
             </ListGroup>
+            {loadingDeliver && <Loader />}
+            {userInfo && userInfo.isAdmin && order.isPaid && !order.isDelivered && (
+              <ListGroup.Item> 
+                <Button
+                type='button'
+                className='btn btn-block'
+                onClick={deliverHandler}
+                >
+                  Mark as deliverd
+                </Button>
+              </ListGroup.Item>
+            )}
           </Card>
         </Col>
       </Row>
