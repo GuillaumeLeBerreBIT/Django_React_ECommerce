@@ -15,6 +15,7 @@
 - [Section 7 — User Login Reducer & Action](#section-7--user-login-reducer--action)
 - [Section 8 — Checkout Flow (Cart → Login → Shipping → Payment → Place Order)](#section-8--checkout-flow-cart--login--shipping)
 - [Section 9 — Get Order by ID API](#section-9--get-order-by-id-api)
+- [Section 11 — Admin Screen Part 2 (Products & Orders CRUD)](#section-11--admin-screen-part-2-products--orders-crud)
 
 ---
 
@@ -4166,6 +4167,307 @@ def get_orders(request):
 **Q: How do you access the DRF browsable API login page?**
 
 The project already has a JWT token endpoint at `POST /api/users/login/`. For protected endpoints, you pass the token in the `Authorization: Bearer <token>` header. There is no browser login form for the browsable API — use a tool like Postman or Thunder Client (VS Code extension) to test protected endpoints.
+
+---
+
+## Section 11 — Admin Screen Part 2 (Products & Orders CRUD)
+
+**Lessons:** 65–73  
+**Commits:** `f843b40` (product admin), `b1a8c26` (order admin)
+
+### What was built
+
+Full admin management for **products** (list, create, edit, delete, image upload) and **orders** (list all, view detail, mark as delivered). This is the second admin section — Section 10 covered user management.
+
+**Files created:**
+- `frontend/src/pages/ProductListScreen.jsx` — admin product list with create + delete buttons
+- `frontend/src/pages/ProductEditScreen.jsx` — form to edit all product fields + image upload
+- `frontend/src/pages/OrderListScreen.jsx` — admin view of every order placed on the site
+
+**Files modified:**
+- `backend/api/views/product_views.py` — added `DeleteProduct`, `CreateProduct`, `UpdateProduct`, `UploadImage` views
+- `backend/api/urls/product_urls.py` — registered the four new product endpoints
+- `backend/api/views/order_views.py` — added `AllOrders` (list every order) and `OrderDelivered` (mark delivered)
+- `backend/api/urls/order_urls.py` — registered the two new order endpoints
+- `backend/api/models.py` + migration `0005` — minor product image field change
+- `frontend/src/actions/productActions.js` — added `deleteProduct`, `createProduct`, `updateProduct` Redux actions
+- `frontend/src/reducers/productReducers.js` — added reducers for delete, create, update
+- `frontend/src/constants/productConstants.js` — added constants for the three new action types
+- `frontend/src/actions/orderActions.js` — added `listOrders`, `deliverOrder` actions
+- `frontend/src/reducers/orderReducers.js` — added `orderListReducer`, `orderDeliverReducer`
+- `frontend/src/constants/orderConstants.js` — added `ORDER_LIST_*` and `ORDER_DELIVERED_*` constants
+- `frontend/src/pages/OrderScreen.jsx` — added "Mark as Delivered" button (admin only) + deliver Redux wiring
+- `frontend/src/App.js` — added routes for `/admin/productlist/`, `/admin/product/:id/edit/`, `/admin/orderlist/`
+- `frontend/public/images/placeholder.png` — default image used when a new product is created
+
+---
+
+### Backend — New Product Endpoints
+
+```python
+# backend/api/views/product_views.py
+
+class DeleteProduct(APIView):
+    permission_classes = [IsAdminUser]
+
+    def delete(self, request, pk):
+        product = Product.objects.get(_id=pk)
+        product.delete()
+        return Response('Product Deleted')
+
+class CreateProduct(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        user = request.user
+        product = Product.objects.create(
+            user=user,
+            name='Sample Name',
+            price=0,
+            brand='Sample Brand',
+            countInStock=0,
+            category='Sample Category',
+            description=''
+        )
+        serializer = ProductSerializer(product, many=False)
+        return Response(serializer.data)
+
+class UpdateProduct(APIView):
+    def put(self, request, pk):
+        data = request.data
+        product = Product.objects.get(_id=pk)
+        product.name = data['name']
+        product.price = data['price']
+        # ... (all fields updated then saved)
+        product.save()
+        serializer = ProductSerializer(product, many=False)
+        return Response(serializer.data)
+
+class UploadImage(APIView):
+    def post(self, request):
+        product_id = request.data['product_id']
+        product = Product.objects.get(_id=product_id)
+        product.image = request.FILES.get('image')   # multipart/form-data
+        product.save()
+        serializer = ProductSerializer(product, many=False)
+        return Response(serializer.data)
+```
+
+**Key concept — `request.FILES`:** When an HTML form uploads a file, Django puts the binary file data in `request.FILES`, not `request.data`. You must send the request with `Content-Type: multipart/form-data` (not JSON). React does this automatically when you use `FormData`.
+
+```python
+# backend/api/urls/product_urls.py
+urlpatterns = [
+    path('',                    views.GetProducts.as_view(),   name='get_products'),
+    path('create/',             views.CreateProduct.as_view(), name='create_product'),
+    path('upload/',             views.UploadImage.as_view(),   name='image_upload'),
+    path('<str:pk>',            views.GetProduct.as_view(),    name='user_order'),
+    path('update/<str:pk>/',    views.UpdateProduct.as_view(), name='update_product'),
+    path('delete/<str:pk>/',    views.DeleteProduct.as_view(), name='delete_product'),
+]
+```
+
+**Complete product URL table:**
+
+| Endpoint | Method | Auth | What |
+|---|---|---|---|
+| `GET /api/products/` | GET | Public | List all products |
+| `POST /api/products/create/` | POST | Admin | Create placeholder product |
+| `PUT /api/products/update/<pk>/` | PUT | Admin | Update product fields |
+| `DELETE /api/products/delete/<pk>/` | DELETE | Admin | Delete a product |
+| `GET /api/products/<pk>` | GET | Public | Get single product |
+| `POST /api/products/upload/` | POST | Any | Upload product image |
+
+---
+
+### Backend — New Order Endpoints
+
+```python
+# backend/api/views/order_views.py
+
+class AllOrders(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, _request):
+        orders = Order.objects.all()   # no filter — admin sees everything
+        serializer = OrderSerializer(orders, many=True)
+        return Response(serializer.data)
+
+class OrderDelivered(APIView):
+    permission_classes = [IsAdminUser]
+
+    def put(self, _request, pk):
+        order = Order.objects.get(_id=pk)
+        order.isDelivered = True
+        order.deliveredAt = datetime.now()
+        order.save()
+        return Response('Order was delivered.')
+```
+
+```python
+# backend/api/urls/order_urls.py
+urlpatterns = [
+    path('',                        views.AllOrders.as_view(),      name='orders'),
+    path('add/',                    views.OrderItemsAPI.as_view(),  name='orders-add'),
+    path('myorders/',               views.userOrders.as_view(),     name='my-orders'),
+    path('<str:pk>/deliver/',       views.OrderDelivered.as_view(), name='order-delivered'),
+    path('<str:pk>/',               views.OrderIdAPI.as_view(),     name='user-order'),
+]
+```
+
+**Key concept — URL ordering matters:** `<str:pk>/deliver/` must come before `<str:pk>/` in `urlpatterns`. Django matches URLs top-to-bottom. If the `<str:pk>/` pattern came first, a request to `/api/orders/5/deliver/` would match it (with `pk="5/deliver"`) before ever reaching the deliver route.
+
+---
+
+### Frontend — ProductListScreen
+
+The admin product list page (`/admin/productlist/`):
+
+```jsx
+// Pattern: dispatch delete → useEffect watches successDelete → re-fetches list
+function deleteHandler(productId) {
+  if (window.confirm("Are you sure you want to delete this product?")) {
+    dispatch(deleteProduct(productId));
+  }
+}
+
+function createProductHandler() {
+  dispatch(createProduct());  // creates placeholder on backend
+}
+
+// In useEffect:
+if (successCreated) {
+  navigate(`/admin/product/${createdProduct._id}/edit`);  // go straight to edit
+}
+```
+
+**Create-then-redirect pattern:** Instead of opening a blank form, the app calls the API to create a placeholder product (with default values like "Sample Name"), then immediately redirects to the edit screen for that new product. This means there's always a real DB record to save against — no orphaned form state.
+
+**Why `PRODUCT_CREATE_RESET` at the top of useEffect?** Without this reset, `successCreated` stays `true` in Redux state after you land on the edit page, which would cause an infinite redirect loop when you come back to the list. Resetting it clears the flag.
+
+---
+
+### Frontend — ProductEditScreen
+
+The edit form (`/admin/product/:id/edit/`):
+
+```jsx
+// Load product into local state when the component mounts
+useEffect(() => {
+  if (successUpdate) {
+    dispatch({ type: PRODUCT_UPDATE_RESET });
+    navigate('/admin/productlist/');
+  } else {
+    if (!product.name || product._id !== Number(productId)) {
+      dispatch(listProductDetails(productId));   // fetch from API
+    } else {
+      setName(product.name);    // populate form fields from Redux state
+      setPrice(product.price);
+      // ... etc
+    }
+  }
+}, [product, dispatch, productId, navigate, successUpdate]);
+```
+
+**Image upload — two inputs, one field:**
+```jsx
+<Form.Control type="text" value={image} onChange={(e) => setImage(e.target.value)} />
+<Form.Control type="file" onChange={uploadFileHandler} />
+```
+The text input lets you paste a URL manually. The file input triggers `uploadFileHandler` which sends the binary file to `/api/products/upload/` via `multipart/form-data`. When the upload succeeds, `setImage(data.image)` updates the local state with the server path — the same `image` field the form will submit on save.
+
+```jsx
+async function uploadFileHandler(e) {
+  const file = e.target.files[0];
+  const formData = new FormData();
+  formData.append('image', file);
+  formData.append('product_id', productId);
+
+  const config = { headers: { 'Content-Type': 'multipart/form-data' } };
+  const { data } = await axios.post('/api/products/upload/', formData, config);
+  setImage(data.image);
+}
+```
+
+**Key concept — `FormData`:** This is the browser's built-in object for sending files over HTTP. When you `append` a `File` to it and POST it, the browser automatically encodes it as `multipart/form-data`. You cannot send binary files as JSON.
+
+---
+
+### Frontend — OrderListScreen
+
+The admin order list (`/admin/orderlist/`). Only accessible to admins:
+
+```jsx
+useEffect(() => {
+  if (userInfo && userInfo.isAdmin) {
+    dispatch(listOrders());   // fetches GET /api/orders/ — all orders
+  } else {
+    navigate('/login');
+  }
+}, [dispatch, navigate, userInfo]);
+```
+
+The table shows: ID, username, date, total, paid date (or red X), delivered date (or red X), and a "Details" link that goes to `/order/:id` — the same order detail screen regular users see, but with the "Mark as Delivered" button shown for admins.
+
+---
+
+### Frontend — Mark as Delivered (OrderScreen)
+
+The `OrderScreen.jsx` was updated to add admin-only deliver functionality:
+
+```jsx
+// New Redux state slice
+const orderDeliver = useSelector((state) => state.orderDeliver);
+const { loading: loadingDeliver, success: successDeliver } = orderDeliver;
+
+// useEffect now also resets deliver state and re-fetches when successDeliver fires
+if (!order || successPay || order._id !== Number(id) || successDeliver) {
+  dispatch({ type: ORDER_PAY_RESET });
+  dispatch({ type: ORDER_DELIVERED_RESET });
+  dispatch(getOrderDetails(id));
+}
+
+function deliverHandler() {
+  dispatch(deliverOrder(order));
+}
+```
+
+The "Mark as Delivered" button only renders when `userInfo.isAdmin` is true, so regular users never see it.
+
+---
+
+### Redux — New Actions (Products)
+
+Three new thunk actions added to `productActions.js`:
+
+| Action | API call | When used |
+|---|---|---|
+| `deleteProduct(id)` | `DELETE /api/products/delete/:id/` | Admin clicks trash icon |
+| `createProduct()` | `POST /api/products/create/` | Admin clicks "Create Product" |
+| `updateProduct(product)` | `PUT /api/products/update/:id/` | Admin submits edit form |
+
+All three follow the same three-step pattern: dispatch `_REQUEST` → call API with auth header → dispatch `_SUCCESS` or `_FAIL`.
+
+### Redux — New Actions (Orders)
+
+| Action | API call | When used |
+|---|---|---|
+| `listOrders()` | `GET /api/orders/` | Admin loads order list page |
+| `deliverOrder(order)` | `PUT /api/orders/:id/deliver/` | Admin clicks "Mark as Delivered" |
+
+---
+
+### Key Concepts Summary
+
+| Concept | What to remember |
+|---|---|
+| `IsAdminUser` permission | DRF built-in — blocks anyone where `is_staff=False`. All admin endpoints use this. |
+| Create-then-redirect | Create a DB record first with defaults, then redirect to its edit form. Avoids orphaned form state. |
+| `PRODUCT_CREATE_RESET` | Must reset success flags in `useEffect` or the redirect triggers in a loop. |
+| `request.FILES` | Binary file uploads land here, not in `request.data`. Requires `multipart/form-data`. |
+| `FormData` | Browser API to send files over HTTP. Pass it to `axios.post` with `Content-Type: multipart/form-data`. |
+| URL ordering | More specific paths (`<pk>/deliver/`) must be listed before catch-all paths (`<pk>/`) in Django `urlpatterns`. |
+| Two image inputs | Text field for URL path + file input for upload — both control the same `image` state variable. |
 
 ---
 
