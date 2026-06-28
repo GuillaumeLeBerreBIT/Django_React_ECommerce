@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
 
 from ..products import products
-from ..models import Product
+from ..models import Product, Review
 from ..serializers import ProductSerializer
 
 from django.contrib.auth.hashers import make_password
@@ -100,3 +100,44 @@ class UploadImage(APIView):
 
         serializer = ProductSerializer(product, many=False)
         return Response(serializer.data)
+    
+class CreateProductReview(APIView):
+    
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request, pk):
+        
+        user = request.user
+        product = Product.objects.get(_id=pk)
+        data = request.data
+        
+        already_exists = product.review_set.filter(user=user).exists()
+        
+        if already_exists:
+            content = {'details': 'Product already rewieved'}
+            return Response(content, status=status.HTTP_400_BAD_REQUEST)
+            
+        elif data['rating'] == 0:
+            content = {'details': 'Please select a rating'}
+            return Response(content, status=status.HTTP_400_BAD_REQUEST)
+            
+        else:
+            review = Review.objects.create(
+                user=user,
+                product=product,
+                name=user.first_name,
+                rating=data['rating'],
+                comment=data['comment'],
+            )
+            
+            reviews = product.review_set.all()
+            product.numReviews = len(reviews)
+            
+            total = 0
+            for i in reviews:
+                total += i.rating 
+                
+            product.rating = total / len(reviews)
+            product.save()
+            
+            return Response('Review added')
