@@ -16,6 +16,7 @@
 - [Section 8 — Checkout Flow (Cart → Login → Shipping → Payment → Place Order)](#section-8--checkout-flow-cart--login--shipping)
 - [Section 9 — Get Order by ID API](#section-9--get-order-by-id-api)
 - [Section 11 — Admin Screen Part 2 (Products & Orders CRUD)](#section-11--admin-screen-part-2-products--orders-crud)
+- [Section 12 — Search & Pagination](#section-12--search--pagination)
 
 ---
 
@@ -4468,6 +4469,478 @@ All three follow the same three-step pattern: dispatch `_REQUEST` → call API w
 | `FormData` | Browser API to send files over HTTP. Pass it to `axios.post` with `Content-Type: multipart/form-data`. |
 | URL ordering | More specific paths (`<pk>/deliver/`) must be listed before catch-all paths (`<pk>/`) in Django `urlpatterns`. |
 | Two image inputs | Text field for URL path + file input for upload — both control the same `image` state variable. |
+
+---
+
+---
+
+## Section 12 — Search & Pagination
+
+### What was built
+
+Keyword search and page-by-page navigation for the product list, wired end-to-end from the URL bar → React → Redux → Django paginator → back to React. Two reusable components (`SearchBox`, `Paginate`) drive it, and the same pattern is reused on both the public home page and the admin product list.
+
+> ⚠️ **Course was heavily outdated here.** The video was recorded for **React Router v5**, which gave components `history`, `location`, and `match` as props. We're on **React Router v6/v7**, where those props are gone and everything is read through hooks. Every snippet below is the *corrected v6 version* — the "Course (v5)" column shows what the video did so you can recognise it, and the "Why it broke" notes explain the fix.
+
+**Files created:**
+- `frontend/src/components/SearchBox.jsx` — the search input in the navbar
+- `frontend/src/components/Paginate.jsx` — the numbered page buttons
+
+**Files modified:**
+- `backend/api/views/product_views.py` — `GetProducts` now filters by keyword and paginates
+- `frontend/src/actions/productActions.js` — `listProducts(keyword, page)` sends both query params
+- `frontend/src/pages/HomeScreen.jsx` — reads `keyword` + `page` from the URL, renders `<Paginate>`
+- `frontend/src/pages/ProductListScreen.jsx` — same wiring for the admin list
+- `frontend/src/components/Header.jsx` — mounts `<SearchBox>` in the navbar
+
+---
+
+### The big picture — the URL is the source of truth
+
+The key idea: **the search keyword and current page live in the URL query string**, not in component state. Everything reads from the URL and writes back to it.
+
+```
+User clicks page "2"
+        ↓
+URL becomes  /?keyword=phone&page=2
+        ↓
+HomeScreen reads keyword + page from the URL (useSearchParams)
+        ↓
+dispatch(listProducts("phone", "2"))
+        ↓
+axios GET /api/products/?keyword=phone&page=2
+        ↓
+Django filters by keyword, paginates, returns { products, page, pages }
+        ↓
+Redux store updates → HomeScreen re-renders the grid + page buttons
+```
+
+**Why put state in the URL instead of `useState`?**
+- The result is **shareable / bookmarkable** — `/?keyword=phone&page=2` reproduces the exact view.
+- The **back button works** — each search/page is a real browser history entry.
+- No state to keep in sync — the URL *is* the state, and `useSearchParams` re-renders the component whenever it changes.
+
+---
+
+### Backend — `GetProducts` filter + paginate
+
+```python
+# backend/api/views/product_views.py
+from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
+
+class GetProducts(APIView):
+    def get(self, request):
+        q = request.query_params.get('keyword')      # may be None
+        if q == None:
+            q = ''
+
+        products = Product.objects.filter(name__icontains=q)   # 1. filter
+
+        page = request.query_params.get('page')                # 2. which page?
+        paginator = Paginator(products, 5)                     # 5 per page
+
+        try:
+            products = paginator.page(page)
+        except PageNotAnInteger:
+            products = paginator.page(1)                       # no/garbage page → page 1
+        except EmptyPage:
+            products = paginator.page(paginator.num_pages)     # too-high page → last page
+
+        # products.number is the page the paginator ACTUALLY resolved to —
+        # always a valid int, even when 'page' came in empty or out of range.
+        page = products.number
+
+        serializer = ProductSerializer(products, many=True)
+        return Response({
+            'products': serializer.data,
+            'page': page,                      # current page (echoed back)
+            'pages': paginator.num_pages,      # total number of pages
+        })
+```
+
+**Step by step:**
+
+| Line | What it does |
+|---|---|
+| `request.query_params.get('keyword')` | Reads `?keyword=...` from the URL. Returns `None` if absent → defaulted to `''`. |
+| `name__icontains=q` | Case-insensitive "contains" filter. `''` matches everything, so no keyword = all products. |
+| `Paginator(products, 5)` | Wraps the queryset, 5 items per page. Change this number to change page size. |
+| `paginator.page(page)` | Grabs just that page's slice of records. |
+| `except PageNotAnInteger` | `page` was `None`, `''`, or non-numeric → fall back to page 1. |
+| `except EmptyPage` | `page` was higher than `num_pages` → fall back to the last page. |
+| `paginator.num_pages` | Total page count — the frontend uses this to know how many buttons to draw. |
+
+**The response shape changed.** Before, `GetProducts` returned a bare list `[ {...}, {...} ]`. Now it returns an **object** `{ products, page, pages }`. That's why the reducer and the components had to start reading `data.products` instead of `data` (covered below).
+
+#### 🐞 Bug we hit: `int('')` → 500 error
+
+The course wrote this tail end:
+
+```python
+if page == None:
+    page = 1
+page = int(page)        # 💥 crashes when page is '' (empty string)
+```
+
+When the frontend sends `?page=` with **no value** (the default before you've clicked a page button), `page` is the empty string `''`, not `None`. So `if page == None` is skipped, and `int('')` throws `ValueError` → Django returns **500 Internal Server Error**.
+
+**Fix:** drop the manual re-parsing entirely and read `products.number` — the page the paginator already resolved to. It's guaranteed to be a valid integer, and it also corrects out-of-range pages automatically (asking for page 999 reports the real last page, instead of echoing back `999`).
+
+| `page` value sent | `int(page)` (course) | `products.number` (fixed) |
+|---|---|---|
+| `None` | ok (after `=1`) | `1` ✅ |
+| `''` (empty) | **500 crash** 💥 | `1` ✅ |
+| `'2'` | `2` | `2` ✅ |
+| `'999'` (too high) | `999` (a lie) | last page ✅ |
+
+---
+
+### Django `Paginator` — deeper dive
+
+The course treats `Paginator` as a black box. Here's the actual object model so you know what you're working with.
+
+`Paginator(object_list, per_page)` returns a **Paginator** object. Calling `.page(n)` on it returns a **Page** object. They're two different things with different attributes:
+
+```python
+paginator = Paginator(products, 5)     # Paginator object
+page_obj  = paginator.page(2)          # Page object (page 2's slice)
+```
+
+**Paginator object — describes the whole set:**
+
+| Attribute / method | Returns | Use |
+|---|---|---|
+| `paginator.count` | total number of items (all pages) | "Showing X of **42** products" |
+| `paginator.num_pages` | total number of pages | how many buttons to draw → sent as `pages` |
+| `paginator.page_range` | `range(1, num_pages + 1)` | iterate page numbers server-side |
+| `paginator.page(n)` | a Page object | raises `PageNotAnInteger` / `EmptyPage` |
+
+**Page object — describes one page:**
+
+| Attribute / method | Returns | Use |
+|---|---|---|
+| `page_obj.object_list` | the actual records on this page | what you serialize |
+| `page_obj.number` | this page's number (validated int) | the "current page" → sent as `page` |
+| `page_obj.has_next()` | `True` / `False` | enable/disable a "Next" button |
+| `page_obj.has_previous()` | `True` / `False` | enable/disable a "Prev" button |
+| `page_obj.next_page_number()` | next page's number | ⚠️ raises `EmptyPage` if there is none |
+| `page_obj.paginator` | back-reference to the Paginator | reach `count` / `num_pages` from the page |
+
+> **Why `ProductSerializer(products, many=True)` works even though `products` is a Page object:** a Page is *iterable* — looping it yields the records in `object_list`. DRF iterates it just like a queryset. That's also why we reassign `products = paginator.page(page)` and serialize that variable directly.
+
+---
+
+### ⚠️ What to watch out for with Django pagination
+
+**1. Always order your queryset, or pagination is non-deterministic.**
+
+```python
+# ⚠️ unordered → Django warns: "UnorderedObjectListWarning"
+products = Product.objects.filter(name__icontains=q)
+
+# ✅ ordered → page boundaries are stable
+products = Product.objects.filter(name__icontains=q).order_by('_id')   # or '-createdAt'
+```
+
+Without an explicit `.order_by()`, the database is free to return rows in *any* order, and that order can differ between requests. The result: the same product can appear on page 1 *and* page 2, or get skipped entirely as you page. Django raises `UnorderedObjectListWarning` to flag exactly this. **Our current view has this latent bug** — `Product.objects.filter(...)` has no ordering. Add `.order_by('-createdAt')` (newest first) to be safe.
+
+**2. `Paginator` runs a `COUNT(*)` query.** Accessing `.count` or `.num_pages` triggers a `SELECT COUNT(*)`, and `.page()` runs a second query with `LIMIT/OFFSET`. So each list request is ~2 queries. Fine here, but on huge tables a `COUNT(*)` gets slow — that's when people reach for cursor pagination.
+
+**3. Deep `OFFSET` is slow on large tables.** `LIMIT 5 OFFSET 100000` still makes the DB walk past 100k rows. Not a concern for a course catalog, but it's the reason "page 5000" links are rare on real sites.
+
+**4. Pass the *page number*, not the queryset, around.** A Page object isn't JSON-serializable and isn't a queryset — don't try to `.filter()` it or return it raw. Serialize `object_list` (or iterate the Page, as DRF does).
+
+**5. Catch BOTH exceptions.** `paginator.page()` raises two different errors and they need different handling:
+
+```python
+try:
+    products = paginator.page(page)
+except PageNotAnInteger:        # page was None / '' / 'abc'
+    products = paginator.page(1)
+except EmptyPage:               # page was a number, but out of range (e.g. 999)
+    products = paginator.page(paginator.num_pages)
+```
+
+Forgetting `EmptyPage` means a `?page=999` URL throws an uncaught exception → 500.
+
+---
+
+### The "proper" DRF way (for reference)
+
+Django REST Framework ships its own pagination that does all of the above (count, page param, next/prev links) automatically. The course hand-rolls `Paginator` instead — useful for *learning* what's happening, but in a real DRF project you'd typically configure:
+
+```python
+# settings.py
+REST_FRAMEWORK = {
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 5,
+}
+```
+
+Then any `ListAPIView` paginates for free and returns `{ count, next, previous, results }`. We're **not** using this — we stuck with the manual `Paginator` to match the course and to keep full control of the `{ products, page, pages }` shape the React side expects. Worth knowing the built-in exists so you recognise it elsewhere.
+
+| | Manual `Paginator` (course/ours) | DRF `PageNumberPagination` |
+|---|---|---|
+| Where | inside each `get()` | configured once in settings |
+| Response shape | `{ products, page, pages }` (custom) | `{ count, next, previous, results }` |
+| Control | full | convention-driven |
+| Best for | learning / custom shapes | most real DRF APIs |
+
+---
+
+### `productActions.js` — sending both query params
+
+```js
+export const listProducts = (keyword = '', page = '') => async (dispatch) => {
+  try {
+    dispatch({ type: PRODUCT_LIST_REQUEST });
+    const { data } = await axios.get(
+      `/api/products/?keyword=${keyword}&page=${page}`,
+    );
+    dispatch({ type: PRODUCT_LIST_SUCCESS, payload: data });
+  } catch (error) {
+    dispatch({
+      type: PRODUCT_LIST_FAIL,
+      error: error.response && error.response.data.detail
+        ? error.response.data.detail
+        : error.message,
+    });
+  }
+};
+```
+
+Both `keyword` and `page` default to `''`, so old calls like `listProducts()` still work (they just fetch page 1 of everything). The payload is now the `{ products, page, pages }` object from the backend.
+
+**Reducer change:** because the response is now an object, `PRODUCT_LIST_SUCCESS` spreads it so `products`, `page`, and `pages` all land in the slice:
+
+```js
+case PRODUCT_LIST_SUCCESS:
+  return {
+    loading: false,
+    products: action.payload.products,
+    page: action.payload.page,
+    pages: action.payload.pages,
+  };
+```
+
+---
+
+### `SearchBox.jsx` — the search input (v6 rewrite)
+
+```jsx
+import React, { useState } from "react";
+import { Form, Button } from "react-bootstrap";
+import { useNavigate, useLocation } from "react-router-dom";
+
+export default function SearchBox() {
+  const [keyword, setKeyword] = useState("");
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  const submitHandler = (e) => {
+    e.preventDefault();
+    if (keyword.trim()) {
+      navigate(`/?keyword=${keyword}`);   // push the search into the URL
+    } else {
+      navigate(location.pathname);        // empty search → clear the query string
+    }
+  };
+
+  return (
+    <Form onSubmit={submitHandler} className="d-flex">
+      <Form.Control
+        type="text"
+        name="q"
+        onChange={(e) => setKeyword(e.target.value)}
+        className="mr-sm-2 ml-sm-5"
+      />
+      <Button type="submit" variant="outline-success" className="p-2 mx-2">
+        Submit
+      </Button>
+    </Form>
+  );
+}
+```
+
+**What it does:** keeps the typed text in local `useState`, and on submit **navigates** to `/?keyword=...`. It does *not* fetch anything itself — it just changes the URL. HomeScreen, watching the URL, does the fetching.
+
+| Course (v5) | Ours (v6) | Why it broke |
+|---|---|---|
+| `history.push(...)` | `navigate(...)` from `useNavigate()` | `history` prop no longer injected |
+| `history.location` | `useLocation()` hook | same — read via hook now |
+
+---
+
+### `Paginate.jsx` — the page buttons (v6 rewrite)
+
+```jsx
+import React from "react";
+import { Pagination } from "react-bootstrap";
+import { LinkContainer } from "react-router-bootstrap";
+
+export default function Paginate({ pages, page, keyword = "", isAdmin = false }) {
+  return (
+    pages > 1 && (
+      <Pagination>
+        {[...Array(pages).keys()].map((x) => (
+          <LinkContainer
+            key={x + 1}
+            to={
+              !isAdmin
+                ? { pathname: "/", search: `?keyword=${keyword}&page=${x + 1}` }
+                : { pathname: "/admin/productlist/", search: `?keyword=${keyword}&page=${x + 1}` }
+            }
+          >
+            <Pagination.Item active={x + 1 === page}>{x + 1}</Pagination.Item>
+          </LinkContainer>
+        ))}
+      </Pagination>
+    )
+  );
+}
+```
+
+**Breaking it down:**
+- `pages > 1 && (...)` — only render the control if there's more than one page (short-circuit: returns `false`, which renders nothing).
+- `[...Array(pages).keys()]` — builds `[0, 1, 2, ...]` of length `pages`. Each `x` is a zero-based index, so the button label/page is `x + 1`.
+- `active={x + 1 === page}` — highlights the button matching the current page (the `page` echoed back from the backend).
+- `isAdmin` switches the link target between the public `/` route and the `/admin/productlist/` route, so the same component serves both screens.
+
+#### 🐞 Bug #1: `?` not allowed in `to.pathname` (v6 router error)
+
+The course passed the whole path as one string:
+
+```jsx
+<LinkContainer to={`/?keyword=${keyword}&page=${x + 1}`}>   // v5 — fine
+```
+
+In v6 this throws:
+
+```
+Cannot include a '?' character in a manually specified `to.pathname` field.
+Please separate it out to the `to.search` field.
+```
+
+React Router v6 is strict: a **pathname** must be only a path. The query string has to be a separate `search` field. **Fix:** pass an object `{ pathname, search }`:
+
+```jsx
+to={{ pathname: "/", search: `?keyword=${keyword}&page=${x + 1}` }}   // v6 ✅
+```
+
+#### 🐞 Bug #2: keyword-mangling `split()` left over from the course
+
+The video did this inside Paginate (because in its setup `keyword` arrived as the full string `/?keyword=phone`):
+
+```jsx
+if (keyword) {
+  keyword = keyword.split("/?keyword=")[1];   // strips the prefix
+}
+```
+
+In our v6 setup the screen already passes a **clean** keyword (just `phone`), so the split finds nothing and returns `undefined`, producing `?keyword=undefined&page=2` — which then searches for the literal text "undefined" and shows no results. **Fix:** delete the split; pass the clean keyword straight through.
+
+---
+
+### Wiring it into the screens — `useSearchParams`
+
+This is the v6 replacement for the v5 `location.search` + `queryString` parsing the course used.
+
+```jsx
+// HomeScreen.jsx
+import { useSearchParams } from "react-router-dom";
+
+const productList = useSelector((state) => state.productList);
+const { error, loading, products, page, pages } = productList;   // page/pages now in store
+
+const [searchParams] = useSearchParams();
+let keyword    = searchParams.get("keyword") || "";   // read ?keyword=
+let pageNumber = searchParams.get("page") || "";       // read ?page=
+
+useEffect(() => {
+  dispatch(listProducts(keyword, pageNumber));
+}, [dispatch, keyword, pageNumber]);   // re-fetch when EITHER changes
+// ...
+<Paginate page={page} pages={pages} keyword={keyword} />
+```
+
+**Two things that are easy to get wrong:**
+
+1. **`pageNumber`, not `page`.** The Redux slice already destructures a `page` (the current page the backend echoes back, used by `<Paginate active>`). If you also name the URL value `page`, you get a `Identifier 'page' has already been declared` parse error. We named the URL one `pageNumber` to avoid the clash — they're different things:
+   - `page` (from store) = the page the server says you're on → drives the active-button highlight.
+   - `pageNumber` (from URL) = the page you're *requesting* → sent in the fetch.
+
+2. **`pageNumber` must be in the `useEffect` dependency array.** This is *the* bug behind "I only ever see page 1." If the effect only depends on `keyword`, then clicking a page button changes the URL but the effect never re-runs, so no new fetch happens. Adding `pageNumber` to the deps makes the component re-fetch whenever the page changes.
+
+| Course (v5) | Ours (v6) |
+|---|---|
+| `const keyword = props.location.search` | `useSearchParams().get('keyword')` |
+| manual `?keyword=...` string slicing | `searchParams.get('page')` reads each param cleanly |
+| `props.match` / `props.history` | `useParams()` / `useNavigate()` |
+
+---
+
+### 🐞 Why the **admin** product list was stuck on page 1
+
+[ProductListScreen.jsx](frontend/src/pages/ProductListScreen.jsx) rendered `<Paginate>`, so the buttons appeared — but the screen never actually used the page number:
+
+- It read `keyword` but **not** `page` from the URL.
+- It called `listProducts()` / `listProducts(keyword)` — **no page argument** → backend always returned page 1.
+- `page` was **missing from the `useEffect` deps** → clicking a button changed the URL but triggered no re-fetch.
+- `<Paginate>` got no `keyword` prop → admin links dropped the search term.
+
+**Fix** — mirror the HomeScreen wiring exactly:
+
+```jsx
+let keyword    = searchParams.get("keyword") || "";
+let pageNumber = searchParams.get("page") || "";
+
+useEffect(() => {
+  dispatch({ type: PRODUCT_CREATE_RESET });
+  if (!userInfo.isAdmin) navigate("/login");
+
+  if (successCreated) {
+    navigate(`/admin/product/${createdProduct._id}/edit`);
+  } else {
+    dispatch(listProducts(keyword, pageNumber));   // ← page now sent
+  }
+}, [dispatch, navigate, userInfo, successDelete, successCreated, createdProduct, keyword, pageNumber]);
+// ...
+<Paginate pages={pages} page={page} keyword={keyword} isAdmin={true} />
+```
+
+(We also removed a duplicate `dispatch(listProducts())` the course left in the admin branch — it fetched twice on every render.)
+
+---
+
+### Mental model — the four moving parts that must agree
+
+When "pagination doesn't work," check these in order — it's almost always one of them:
+
+```
+1. URL          /?keyword=X&page=N      ← does the link/SearchBox write here?
+2. Read         useSearchParams().get   ← does the screen read BOTH params?
+3. Effect deps  [..., keyword, page]    ← does it re-fetch when they change?
+4. Fetch        listProducts(kw, page)  ← does the request actually send page?
+5. Backend      paginator.page(page)    ← does it slice + report num_pages?
+```
+
+If any one link is missing the page value, you get the classic symptom: **the buttons render and the URL changes, but the same first-page products keep showing.**
+
+---
+
+### Key Concepts Summary
+
+| Concept | What to remember |
+|---|---|
+| URL as state | Keyword + page live in the query string, read via `useSearchParams`. Shareable, back-button-friendly. |
+| `useSearchParams` | v6 replacement for v5's `location.search` parsing. `searchParams.get('keyword')`. |
+| `useNavigate` / `useLocation` | v6 replacements for the v5 `history` / `location` props. |
+| `to={{ pathname, search }}` | v6 requires path and query string as separate object fields — a `?` in `pathname` throws. |
+| `Paginator(qs, n)` | Django splits a queryset into pages of `n`. `.num_pages` = total, `.page(x).number` = resolved page. |
+| `products.number` | Use this for the "current page" — never crashes, auto-corrects out-of-range pages. Avoids the `int('')` 500. |
+| `useEffect` deps | The page/keyword **must** be in the deps array or clicking a page won't re-fetch. |
+| `name__icontains` | Case-insensitive "contains" DB filter. Empty string matches everything. |
+| Response shape | `GetProducts` now returns `{ products, page, pages }` (was a bare list) — reducer & screens updated to match. |
 
 ---
 

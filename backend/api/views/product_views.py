@@ -20,10 +20,13 @@ class GetProducts(APIView):
         if q == None:
             q = ''
             
-        products = Product.objects.filter(name__icontains=q)    
+        # Order explicitly so pagination boundaries are stable across requests.
+        # Without .order_by(), the DB may return rows in any order, causing
+        # products to repeat across pages or get skipped (UnorderedObjectListWarning).
+        products = Product.objects.filter(name__icontains=q).order_by('-createdAt')
         
         page = request.query_params.get('page')
-        paginator = Paginator(products, 2)
+        paginator = Paginator(products, 5)
         
         try:
             products = paginator.page(page)
@@ -32,11 +35,10 @@ class GetProducts(APIView):
         except EmptyPage:
             products = paginator.page(paginator.num_pages)
 
-        if page == None:
-            page = 1
-            
-        page = int(page)
-        
+        # products.number is the page the paginator actually resolved to —
+        # always a valid int, even when 'page' came in empty or out of range.
+        page = products.number
+
         # Need to serialize to return real JSON data after retrieving all Queryset Objects
         serializer = ProductSerializer(products, many=True)
         return Response({'products': serializer.data, 'page': page, 'pages': paginator.num_pages})

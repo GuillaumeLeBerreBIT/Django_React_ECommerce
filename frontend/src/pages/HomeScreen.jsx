@@ -4,16 +4,23 @@ import { Row, Col } from "react-bootstrap";
 import Product from "../components/Product";
 import Loader from "../components/Loader";
 import Message from "../components/Message";
+import Paginate from "../components/Paginate";
 import { listProducts } from "../actions/productActions";
+import { useSearchParams } from "react-router-dom";
 
 export default function HomeScreen() {
   const dispatch = useDispatch();
   const productList = useSelector((state) => state.productList);
-  const { error, loading, products } = productList;
+  const { error, loading, products, page, pages } = productList;
+
+  const [searchParams] = useSearchParams()
+
+  let keyword = searchParams.get('keyword') || ''
+  let pageNumber = searchParams.get('page') || ''
 
   useEffect(() => {
-    dispatch(listProducts());
-  }, [dispatch]);
+    dispatch(listProducts(keyword, pageNumber));
+  }, [dispatch, keyword, pageNumber]);
 
   return (
     <div>
@@ -23,13 +30,17 @@ export default function HomeScreen() {
       ) : error ? (
         <Message variant={'danger'}>{error}</Message>
       ) : (
-        <Row>
-          {products.map((p) => (
-            <Col sm={12} md={6} lg={4} xl={3} key={p._id}>
-              <Product product={p} />
-            </Col>
-          ))}
-        </Row>
+        <div>
+          <Row>
+            {products.map((p) => (
+              <Col sm={12} md={6} lg={4} xl={3} key={p._id}>
+                <Product product={p} />
+              </Col>
+            ))}
+          </Row>
+          <Paginate page={page} pages={pages} keyword={keyword} />
+        </div>
+        
       )}
     </div>
   );
