@@ -192,4 +192,4 @@ STATIC_FILES_DIRS = [
     BASE_DIR / 'static'
 ]
 
-MEDIA_ROOT = 'static/images'
+MEDIA_ROOT = BASE_DIR / 'static/images'

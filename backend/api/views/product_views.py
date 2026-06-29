@@ -1,10 +1,11 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 
 from ..products import products
 from ..models import Product, Review
-from ..serializers import ProductSerializer
+from ..serializers import ProductSerializer, ReviewSerializer
 
 from django.contrib.auth.hashers import make_password
 from rest_framework import status
@@ -13,11 +14,32 @@ from rest_framework import status
 class GetProducts(APIView):
 
     def get(self, request):
+        q = request.query_params.get('keyword')
+        print(q)
+        
+        if q == None:
+            q = ''
+            
+        products = Product.objects.filter(name__icontains=q)    
+        
+        page = request.query_params.get('page')
+        paginator = Paginator(products, 2)
+        
+        try:
+            products = paginator.page(page)
+        except PageNotAnInteger:
+            products = paginator.page(1)
+        except EmptyPage:
+            products = paginator.page(paginator.num_pages)
 
-        products = Product.objects.all()
+        if page == None:
+            page = 1
+            
+        page = int(page)
+        
         # Need to serialize to return real JSON data after retrieving all Queryset Objects
         serializer = ProductSerializer(products, many=True)
-        return Response(serializer.data)
+        return Response({'products': serializer.data, 'page': page, 'pages': paginator.num_pages})
 
 
 class GetProduct(APIView):
@@ -109,16 +131,20 @@ class CreateProductReview(APIView):
         
         user = request.user
         product = Product.objects.get(_id=pk)
-        data = request.data
+        
+        serializer = ReviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        rating = serializer.validated_data['rating']
+        comment = serializer.validated_data.get('comment', '')
         
         already_exists = product.review_set.filter(user=user).exists()
         
         if already_exists:
-            content = {'details': 'Product already rewieved'}
+            content = {'detail': 'Product already reviewed'}
             return Response(content, status=status.HTTP_400_BAD_REQUEST)
             
-        elif data['rating'] == 0:
-            content = {'details': 'Please select a rating'}
+        elif rating == 0:
+            content = {'detail': 'Please select a rating'}
             return Response(content, status=status.HTTP_400_BAD_REQUEST)
             
         else:
@@ -126,8 +152,8 @@ class CreateProductReview(APIView):
                 user=user,
                 product=product,
                 name=user.first_name,
-                rating=data['rating'],
-                comment=data['comment'],
+                rating=rating,
+                comment=comment,
             )
             
             reviews = product.review_set.all()
