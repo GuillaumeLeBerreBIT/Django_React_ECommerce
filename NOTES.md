@@ -10,13 +10,16 @@
 - [Project Overview](#project-overview)
 - [Section 1 — Project Setup & Frontend Scaffold](#section-1--project-setup--frontend-scaffold)
 - [Section 2 — Starting the Front End](#section-2--starting-the-front-end)
+- [Section 3 — Django Backend & Connecting React to the API](#section-3--django-backend--connecting-react-to-the-api)
+- [Section 4 — Implementing Redux for State Management](#section-4--implementing-redux-for-state-management)
 - [Section 5 — Adding to Shopping Cart](#section-5--adding-to-shopping-cart)
 - [Section 6 — Backend User Authentication](#section-6--backend-user-authentication)
-- [Section 7 — User Login Reducer & Action](#section-7--user-login-reducer--action)
+- [Section 7 — User Login Reducer & Action (Frontend)](#section-7--user-login-reducer--action-frontend)
 - [Section 8 — Checkout Flow (Cart → Login → Shipping → Payment → Place Order)](#section-8--checkout-flow-cart--login--shipping)
 - [Section 9 — Get Order by ID API](#section-9--get-order-by-id-api)
 - [Section 11 — Admin Screen Part 2 (Products & Orders CRUD)](#section-11--admin-screen-part-2-products--orders-crud)
-- [Section 12 — Search & Pagination](#section-12--search--pagination)
+- [Section 12 — Search, Pagination & Top-Rated Carousel](#section-12--search--pagination)
+- [Course Wrap-Up — End-to-End Architecture Recap](#course-wrap-up--end-to-end-architecture-recap)
 
 ---
 
@@ -4474,7 +4477,7 @@ All three follow the same three-step pattern: dispatch `_REQUEST` → call API w
 
 ---
 
-## Section 12 — Search & Pagination
+## Section 12 — Search, Pagination & Top-Rated Carousel
 
 ### What was built
 
@@ -4928,7 +4931,7 @@ If any one link is missing the page value, you get the classic symptom: **the bu
 
 ---
 
-### Key Concepts Summary
+### Key Concepts Summary (Search & Pagination)
 
 | Concept | What to remember |
 |---|---|
@@ -4944,4 +4947,304 @@ If any one link is missing the page value, you get the classic symptom: **the bu
 
 ---
 
-*More sections will be added as the course progresses.*
+### Top-Rated Products Carousel — the final feature
+
+The last piece of the course: a rotating banner at the top of the home page showing the **five highest-rated products**. It's a complete vertical slice — new Django endpoint, new Redux slice, new component — so it's a good capstone that ties together everything from the earlier sections.
+
+**Files created/updated:**
+- `backend/api/views/product_views.py` — new `TopProduct` APIView
+- `backend/api/urls/product_urls.py` — new `top/` route
+- `frontend/src/constants/productConstants.js` — three `PRODUCT_TOP_*` constants
+- `frontend/src/reducers/productReducers.js` — new `productTopRatedReducers`
+- `frontend/src/actions/productActions.js` — new `listTopProducts` action creator
+- `frontend/src/Store.jsx` — registered the `productTopRated` slice
+- `frontend/src/components/ProductCarousel.jsx` — the carousel component (new)
+- `frontend/src/pages/HomeScreen.jsx` — renders the carousel above the grid
+- `frontend/src/index.css` — carousel styling
+
+---
+
+#### Backend — the `TopProduct` view
+
+```python
+class TopProduct(APIView):
+
+    def get(self, request):
+        products = Product.objects.filter(rating__gte=4).order_by('-rating')[:5]
+        serializer = ProductSerializer(products, many=True)
+        return Response(serializer.data)
+```
+
+Three QuerySet operations chained together, read left to right:
+
+| Piece | What it does |
+|---|---|
+| `.filter(rating__gte=4)` | Keep only products with `rating >= 4`. `__gte` = "greater than or equal". |
+| `.order_by('-rating')` | Sort by rating, **descending** (the `-` prefix). Highest first. |
+| `[:5]` | Slice the first 5. Django turns this into SQL `LIMIT 5` — it does *not* load every row then trim in Python. |
+
+Unlike `GetProducts`, this view returns a **bare list** (`serializer.data`), not the `{ products, page, pages }` shape — there's no pagination here, it's always exactly 5 (or fewer). The matching reducer therefore reads `action.payload` directly as the array.
+
+The `rating__gte` lookup is the same family of "field lookups" as `name__icontains` from the search feature — `__<lookup>` after a field name is how Django expresses WHERE conditions without raw SQL.
+
+**The URL — route ordering matters again:**
+
+```python
+path('top/', views.TopProduct.as_view(), name='top_product'),
+path('<str:pk>/', views.GetProduct.as_view(), name='product'),
+```
+
+`top/` is registered **before** `<str:pk>/` on purpose. Django matches top-to-bottom and stops at the first hit. If `<str:pk>/` came first, a request to `/api/products/top/` would match it with `pk = "top"`, and the detail view would try to look up a product with id `"top"` → 404. Static, literal routes must always sit above greedy parameter routes. (Same lesson as the `create/` vs `<str:pk>/` ordering noted back in Section 11.)
+
+---
+
+#### Frontend — the new Redux slice
+
+The slice follows the exact same request/success/fail shape you've now written a dozen times. Constants:
+
+```js
+export const PRODUCT_TOP_REQUEST = 'PRODUCT_TOP_REQUEST'
+export const PRODUCT_TOP_SUCCESS = 'PRODUCT_TOP_SUCCESS'
+export const PRODUCT_TOP_FAIL    = 'PRODUCT_TOP_FAIL'
+```
+
+Reducer:
+
+```js
+export const productTopRatedReducers = (state = { products: [] }, action) => {
+  switch (action.type) {
+    case PRODUCT_TOP_REQUEST:
+      return { loading: true, products: [] };
+    case PRODUCT_TOP_SUCCESS:
+      return { loading: false, products: action.payload };
+    case PRODUCT_TOP_FAIL:
+      return { loading: false, error: action.error };
+    default:
+      return state;
+  }
+};
+```
+
+Action creator:
+
+```js
+export const listTopProducts = () => async (dispatch) => {
+  try {
+    dispatch({ type: PRODUCT_TOP_REQUEST });
+    const { data } = await axios.get(`/api/products/top/`);
+    dispatch({ type: PRODUCT_TOP_SUCCESS, payload: data });
+  } catch (error) {
+    dispatch({
+      type: PRODUCT_TOP_FAIL,
+      error: error.response && error.response.data.detail
+        ? error.response.data.detail
+        : error.message,
+    });
+  }
+};
+```
+
+Note `payload: data` is the raw array (the backend returns a bare list), so in the component `products` is directly mappable. Registered in the store as `productTopRated: productTopRatedReducers`, read as `state.productTopRated`.
+
+---
+
+#### `ProductCarousel.jsx` — the component
+
+```jsx
+export default function ProductCarousel() {
+  const dispatch = useDispatch();
+  const productTopRated = useSelector((state) => state.productTopRated);
+  const { error, loading, products } = productTopRated;
+
+  useEffect(() => {
+    dispatch(listTopProducts());
+  }, [dispatch]);
+
+  return loading ? (
+    <Loader />
+  ) : error ? (
+    <Message variant="danger">{error}</Message>
+  ) : (
+    <Carousel pause="hover" className="bg-dark">
+      {products.map((product) => (
+        <Carousel.Item key={product._id}>
+          <Link to={`/product/${product._id}/`}>
+            <Image src={product.image} alt={product.name} />
+            <Carousel.Caption>
+              <h4>{product.name} (${product.price})</h4>
+            </Carousel.Caption>
+          </Link>
+        </Carousel.Item>
+      ))}
+    </Carousel>
+  );
+}
+```
+
+**What each part does:**
+- Same `useDispatch` + `useSelector` + `useEffect` pattern as every other data-driven screen — fetch on mount, read the slice, render off `loading`/`error`/`products`.
+- The familiar **three-state ternary** (`loading ? … : error ? … : data`) guards the render so you never `.map()` over an empty/undefined list during the fetch.
+- `<Carousel pause="hover">` — React Bootstrap's carousel. `pause="hover"` stops the auto-rotation while the mouse is over it.
+- Each slide is a `<Carousel.Item>` wrapping a `<Link>` so clicking a slide navigates to that product's detail page.
+- `<Carousel.Caption>` overlays the product name + price on top of the image.
+
+**Why the carousel lives in its own component (not inline in HomeScreen):**
+It owns its own data fetch and its own slice of state. Keeping it self-contained means `HomeScreen` doesn't need to know anything about top-rated products — it just drops `<ProductCarousel />` in and the component handles the rest. This is the same separation-of-concerns idea as `Rating` or `Product` from Section 2.
+
+---
+
+#### Wiring into HomeScreen — hide it during search
+
+```jsx
+import ProductCarousel from "../components/ProductCarousel";
+
+return (
+  <div>
+    {!keyword && <ProductCarousel />}
+    <h1>Latest Product</h1>
+    {/* ...loading guard + product grid + Paginate... */}
+  </div>
+);
+```
+
+`{!keyword && <ProductCarousel />}` — short-circuit rendering. The carousel only shows on the **plain home page**. The moment the user is searching (`keyword` is a non-empty string), it's hidden, because a "top products" banner is noise when you're looking at filtered results. `keyword` comes from the same `useSearchParams` read that drives the search/pagination feature — so the two features share one source of truth.
+
+---
+
+#### The carousel CSS
+
+`index.css` got a `/* carousel */` block. The important rules:
+
+```css
+.carousel-caption { position: absolute; top: 0; }   /* caption at the top, not bottom */
+.carousel-caption h4 { color: #fff; }               /* readable on the dark bg */
+.carousel img {
+  height: 300px;
+  border-radius: 50%;          /* circular product images */
+  margin: 40px auto;           /* centered */
+}
+```
+
+These target the class names that React Bootstrap **generates** (`.carousel`, `.carousel-caption`, `.carousel-item`) — you're styling the library's output, not your own class names.
+
+---
+
+#### ⚠️ Two things to clean up in this code
+
+While documenting this I spotted two harmless-but-worth-fixing issues:
+
+| Issue | Where | Why it's harmless / why fix it |
+|---|---|---|
+| `def get(self, reqeust):` | `TopProduct` view | `reqeust` is misspelled. It still works because the parameter is positional (Django passes the request object regardless of the name), but if you ever reference `request` inside the method it'll be undefined. Rename to `request`. |
+| `className="carousel.caption"` | `ProductCarousel.jsx` | This sets a literal CSS class named `carousel.caption`, which matches nothing. The styling actually comes from React Bootstrap's auto-generated `.carousel-caption`, so the visual result is correct — but the hand-written className does nothing and is misleading. Remove it (as shown in the cleaned snippet above). |
+
+Neither breaks the feature, which is exactly why they're easy to miss — good examples of "works, but not for the reason the code implies."
+
+---
+
+#### The complete flow — home page load
+
+```
+HomeScreen mounts (no keyword)
+    │
+    ├─ {!keyword && <ProductCarousel />}  → carousel renders
+    │        │
+    │        └─ useEffect → dispatch(listTopProducts())
+    │                   │
+    │            ① PRODUCT_TOP_REQUEST → { loading: true } → <Loader />
+    │                   │
+    │            ② axios GET /api/products/top/
+    │                   │
+    │            Django: Product.objects.filter(rating__gte=4)
+    │                            .order_by('-rating')[:5]
+    │                   │
+    │            ③ PRODUCT_TOP_SUCCESS → { loading:false, products:[5] }
+    │                   │
+    │            carousel re-renders → 5 rotating slides
+    │
+    └─ listProducts('', '') → paginated product grid below
+```
+
+Two independent fetches fire on the same page (`listTopProducts` for the banner, `listProducts` for the grid) into two separate slices — neither knows about the other. That independence is the whole point of having separate reducers.
+
+---
+
+## Course Wrap-Up — End-to-End Architecture Recap
+
+The course is complete (all 12 sections). This is the big-picture view of how every piece you built fits together — useful to read top-to-bottom now that all the parts exist.
+
+### The two servers
+
+```
+┌─────────────────────────┐         HTTP / JSON          ┌──────────────────────────┐
+│   React SPA (port 3000) │  ───── axios requests ─────► │  Django + DRF (port 8000)│
+│                         │  ◄──── JSON responses ─────  │                          │
+│  • React Router (URLs)  │                              │  • APIViews (endpoints)  │
+│  • Redux store (state)  │      proxy in package.json   │  • Serializers (↔ JSON)  │
+│  • React-Bootstrap (UI) │      forwards /api/* in dev  │  • Models / ORM          │
+└─────────────────────────┘                              │  • SQLite database       │
+                                                         │  • JWT auth              │
+                                                         └──────────────────────────┘
+```
+
+### Request lifecycle (the pattern every feature follows)
+
+```
+Component (useEffect)
+      │ dispatch(actionCreator(args))
+      ▼
+Action creator (thunk)  ── axios ──►  Django URLconf ──► APIView.get/post/...
+      │   dispatch REQUEST/SUCCESS/FAIL      │                     │
+      ▼                                      │              Model.objects (ORM)
+Reducer (switch on type)                     │                     │
+      │ returns new state                    │              Serializer ↔ JSON
+      ▼                                      ◄─────────────────────┘
+Store updates → useSelector → component re-renders
+```
+
+Every single feature — products, cart, login, orders, reviews, search, top-rated — is a variation on this one loop. Once you've seen it a few times, a "new feature" is just: **a constant trio, a reducer case, an action creator, an endpoint, and a component that reads the slice.**
+
+### Redux store — the full slice map
+
+| Slice | Reducer | Feeds |
+|---|---|---|
+| `productList` | `productListReducers` | Home grid (paginated + searchable) |
+| `productDetails` | `productDetailsReducers` | Product detail page |
+| `productDelete` / `productCreate` / `productUpdate` | admin CRUD | Admin product list & edit |
+| `productReviewCreate` | `productReviewCreateReducers` | Review form |
+| `productTopRated` | `productTopRatedReducers` | Home carousel |
+| `cart` | `cartReducer` | Cart (persisted to localStorage) |
+| `userLogin` / `userRegister` / `userDetails` / `userUpdateProfile` | user auth | Header, login/register, profile |
+| `userList` / `userDelete` / `userUpdate` | admin user CRUD | Admin user management |
+| `orderCreate` / `orderDetails` / `orderPay` / `orderDelivered` | order flow | Checkout & order screen |
+| `orderListMy` / `orderList` | order history | Profile orders & admin orders |
+
+### Backend app structure
+
+```
+backend/
+├── backend/        project config (settings.py, root urls.py)
+└── api/
+    ├── models.py       Product, Review, Order, OrderItem, ShippingAddress
+    ├── serializers.py  Model ↔ JSON converters (+ UserSerializerWithToken for JWT)
+    ├── signals.py      keeps User.username synced to email
+    ├── views/          split by feature (product_views, user_views, order_views)
+    └── urls/           split by feature (product_urls, user_urls, order_urls)
+```
+
+### Cross-cutting lessons that recurred all course
+
+| Theme | Where it showed up |
+|---|---|
+| **Route ordering** (literal before `<param>`) | `create/`, `top/` vs `<str:pk>/` |
+| **React Router v5 → v6** (`match`/`history` props → hooks) | every screen — `useParams`, `useNavigate`, `useSearchParams` |
+| **Redux trio + reducer + action + endpoint** | every data feature |
+| **The three-state ternary** (`loading ? error ? data`) | every screen that fetches |
+| **`useEffect` dependency arrays** | re-fetch on id/keyword/page change |
+| **`null=True` vs `blank=True`** | every nullable model field |
+| **Serializer direction** (incoming vs outgoing) | auth, reviews, orders |
+| **Bootstrap 4 → 5 class changes** | `btn-block` → `w-100`, etc. |
+
+---
+
+*Course complete — all 12 sections documented. This log is now a full reference for the ProShop build.*
