@@ -7,6 +7,7 @@ urlpatterns = [
     path('create/', views.CreateProduct.as_view(), name='create_product'),
     path('upload/', views.UploadImage.as_view(), name='image_upload'),
     path('<str:pk>/reviews/', views.CreateProductReview.as_view(), name='create_review'),
+    path('top/', views.TopProduct.as_view(), name='top_product'),
     path('<str:pk>/', views.GetProduct.as_view(), name='product'),
     path('update/<str:pk>/', views.UpdateProduct.as_view(), name='update_product'),
     path('delete/<str:pk>/', views.DeleteProduct.as_view(), name='delete_product'),

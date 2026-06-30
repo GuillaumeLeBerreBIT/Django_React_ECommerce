@@ -7,6 +7,7 @@ import Message from "../components/Message";
 import Paginate from "../components/Paginate";
 import { listProducts } from "../actions/productActions";
 import { useSearchParams } from "react-router-dom";
+import ProductCarousel from "../components/ProductCarousel";
 
 export default function HomeScreen() {
   const dispatch = useDispatch();
@@ -23,7 +24,9 @@ export default function HomeScreen() {
   }, [dispatch, keyword, pageNumber]);
 
   return (
+    
     <div>
+      {!keyword && <ProductCarousel />}
       <h1>Latest Product</h1>
       {loading ? (
         <Loader />

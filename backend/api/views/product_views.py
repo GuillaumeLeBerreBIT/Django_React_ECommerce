@@ -44,6 +44,14 @@ class GetProducts(APIView):
         return Response({'products': serializer.data, 'page': page, 'pages': paginator.num_pages})
 
 
+class TopProduct(APIView):
+    
+    def get (self, reqeust):
+        products = Product.objects.filter(rating__gte=4).order_by('-rating')[:5]
+        serializer = ProductSerializer(products, many=True)
+        
+        return Response(serializer.data)
+
 class GetProduct(APIView):
 
     def get(self, request, pk):
